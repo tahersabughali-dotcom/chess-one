@@ -10,9 +10,9 @@
 - Batch 1.1 (foundation hardening) was independently reviewed and passed. / الدفعة 1.1 روجعت مراجعة مستقلة ونجحت.
 - Batch 2 (standard chess move-legality core) was independently reviewed, passed, and committed locally. / الدفعة 2 روجعت ونجحت وحُفظت محليًا.
 - Batch 3 (canonical SAN and checkmate/stalemate rule facts) was independently reviewed, passed, and committed locally. / الدفعة 3 روجعت ونجحت وحُفظت محليًا.
-- Batch 4 (repetition identity, draw claims, fivefold, 50/75-move rules) is authorized and in progress. / الدفعة 4 مأذونة وقيد التنفيذ.
+- Batch 4 and review correction 4.1 (repetition identity, draw claims, fivefold, 50/75-move rules) were independently reviewed, passed, and committed locally. / الدفعة 4 والتصحيح 4.1 روجعا ونجحا وحُفظا محليًا.
 - Batch 5 is NOT authorized. / الدفعة 5 غير مأذونة.
-- ENV-NODE-001 remains open: local Node is below the reviewed 24.21.0 LTS baseline. / ENV-NODE-001 ما زال مفتوحًا.
+- ENV-NODE-001 is resolved: local Node is 24.21.0 LTS, and pnpm is 12.7.0 (toolchain maintenance 2026-09-28, uncommitted pending review). / ENV-NODE-001 محلول.
 - v5 remains historical and unchanged. / v5 تاريخي ولا يُعدَّل.
 - All open gates remain binding. / كل البوابات المفتوحة ما زالت ملزمة.
 - Progress is recorded in `PHASE_1_IMPLEMENTATION_LOG.md`. / التقدم مسجل في سجل تنفيذ المرحلة 1.

@@ -702,3 +702,64 @@ A mutation check deliberately broke four things in turn, and each was caught:
 - The Batch 4 thresholds, history convention, claim model, castling identity, and ledger statuses are unchanged. `repetition.ts` is now 122 lines.
 - **Gates:** 24 test files, 293 passed, 0 failed, 0 skipped, 16 todo. Perft and SAN are unchanged. Typecheck, lint, format, boundaries, check, and audit are recorded in the Batch 4.1 review bundle.
 - Dependencies added: 0. `package.json` and `pnpm-lock.yaml` are unchanged. Batch 4 and 4.1 remain uncommitted.
+
+## Toolchain maintenance — 2026-09-28
+
+Owner-authorized, controlled update inside the approved Node 24 LTS and pnpm 12 families. No product code changed.
+
+### Batch 4 + 4.1 commit
+
+- `pnpm check` passed on the old toolchain after six new Batch 4 `.ts` files, which had been converted to CRLF outside the gates, were normalized back to LF. Their content was verified identical to the reviewed Batch 4 and 4.1 review-bundle copies.
+- Committed locally as `bc9e149` "feat: add repetition and draw rule facts". There is no remote and nothing was pushed. The toolchain changes below are uncommitted, for review.
+
+### Versions
+
+| Tool | Before | After | Notes |
+|---|---|---|---|
+| Node.js | 24.14.1 | 24.21.0 | Latest Node 24 LTS ("Krypton", 2026-09-07). Official `node-v24.21.0-x64.msi` from nodejs.org, in-place upgrade of the existing install |
+| npm | 11.11.0 | 11.19.0 | Bundled with Node; not updated separately |
+| pnpm | 12.6.0 | 12.7.0 | Run with `npx --yes pnpm@12.7.0 <command>`; no global install, corepack not enabled |
+
+- Node verification:
+  - The SHA-256 of the MSI matched the official `SHASUMS256.txt` entry `bb0eaee134f9357f22aea915ee793343e627aefc1e66488164bac6915bce2cac`.
+  - The MSI and the installed `node.exe` both carry a valid Authenticode signature from the OpenJS Foundation.
+  - Install: x64 on 64-bit Windows, at `C:\Program Files\nodejs\node.exe`. It is the only Node.js on PATH, and no version manager is installed.
+- **pnpm channel:** the npm `latest` and `latest-12` tags still point at 12.6.0. 12.7.0, 12.8.0, and 12.8.1 are published under `next-12`, and GitHub lists all three as normal releases, not prereleases.
+  - 12.7.0 was chosen because it matches the reviewed 12.7.x target and has been out since 2026-09-25.
+  - 12.8.x was not taken: it is outside the reviewed target, and 12.8.1 was published on the day of this update.
+- **Pins:**
+  - `packageManager` is `pnpm@12.7.0`.
+  - `engines.pnpm` is `12.7.0`. It had to move with `packageManager` because `pnpm-workspace.yaml` sets `engineStrict: true`.
+  - `engines.node` is unchanged (`>=24.11.0 <25.0.0`).
+
+### Direct dependencies
+
+| Package | Before | After | Newest stable | Newest in approved major | Action |
+|---|---|---|---|---|---|
+| typescript | 7.0.2 | 7.0.2 | 7.0.2 | 7.0.2 | KEEP |
+| @biomejs/biome | 2.5.14 | 2.5.14 | 2.5.14 | 2.5.14 | KEEP |
+| vitest | 5.0.2 | 5.0.2 | 5.0.2 | 5.0.2 | KEEP |
+| fast-check | 4.10.2 | 4.10.2 | 4.10.2 | 4.10.2 | KEEP |
+| @types/node | 24.19.0 | 24.19.0 | 26.6.3 | 24.19.0 | KEEP; 26.x deferred, it types Node 26 |
+
+- **TypeScript:** it stayed at 7.0.2, so no AST compatibility migration was needed for the boundary checker. TST-BOUNDARY-001 to 019 and `check:boundaries` (67 files) still pass on the new toolchain.
+- **Lockfile:** the only change is the pnpm self-entry (`packageManagerDependencies`): `pnpm` and its 14 `@pnpm/exe.*` platform packages, 12.6.0 to 12.7.0, with version and integrity lines only.
+  - The pnpm@12.7.0 integrity matches the registry.
+  - Project packages: 94 before and after. pnpm self-entries: 15 before and after.
+- No transitive pins or overrides were added.
+
+### Security and supply chain
+
+- `pnpm audit`: no known vulnerabilities.
+- All 109 lockfile packages have sha512 integrity.
+- There are no tarball, git, or `file:` sources. The only `link:` entries are the internal workspace packages.
+- No installed package has a preinstall, install, or postinstall script, and no package is deprecated.
+- Native binaries are unchanged and all come from existing dependencies: the Biome, TypeScript 7, rolldown, and lightningcss platform packages.
+
+### Gates on Node 24.21.0 and pnpm 12.7.0
+
+- typecheck, lint, format:check, check:boundaries, test, test:rules, check, and audit all pass.
+- 24 test files: 293 passed, 0 failed, 0 skipped, 16 todo, identical to the pre-maintenance baseline.
+- Perft vectors are unchanged. SAN, repetition, draw, and golden rows 018 to 023b are unchanged and passing.
+
+ENV-NODE-001 is **RESOLVED**: it was opened for Node 24.14.1, and Node 24.21.0 is now the active runtime.
