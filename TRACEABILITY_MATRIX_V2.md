@@ -2,7 +2,7 @@
 
 **Supersedes for implementation / يحل محل التنفيذ:** section 48 in the preserved v4 text. That section mapped architecture requirements to MOD-014 and social requirements to the tournament module. Do not use it.
 
-**Implementation status / حالة التنفيذ:** `NOT_STARTED` unless a row says `PARTIAL`. Phase 1 Batch 1 (P1-B1) advanced six rows partially; Batch 1.1 (P1-B1.1) hardened three of them without changing their status; see `PHASE_1_IMPLEMENTATION_LOG.md`. No row is complete.
+**Implementation status / حالة التنفيذ:** `NOT_STARTED` unless a row says `PARTIAL`. Phase 1 Batch 1 (P1-B1) advanced six rows partially; Batch 1.1 (P1-B1.1) hardened three of them without changing their status; Batch 2 (P1-B2) advanced FR-P06-005 to PARTIAL; see `PHASE_1_IMPLEMENTATION_LOG.md`. No row is complete.
 
 **Rule / القاعدة:** a cell is `TBD` when this rebuild cannot prove the link from the module map, the named page list, a v5 decision, or a v5 contract. `TBD` is not a guess.
 
@@ -179,7 +179,7 @@ Section 48 feature ids such as `FTR-ARC-001` are not reused, because they were a
 | FR-P06-002 | Stack baseline | TBD | TBD | TBD | DEC-056 | TST-FAILURE | DEC-056; DEC-057 | PARTIAL: TypeScript, Node 24, pnpm, Biome, Vitest, fast-check in use (P1-B1). Next, React, Fastify, PostgreSQL, Kysely not started. ENV-NODE-001 open: local Node 24.14.1 is below the reviewed 24.21.0 LTS baseline (P1-B1.1) |
 | FR-P06-003 | Version currency | TBD | TBD | TBD | STACK_DECISION_RECORD_V1 | TBD | DEC-057 | PARTIAL: exact pins and lockfile for Batch 1 tools (P1-B1) |
 | FR-P06-004 | Repository boundaries | TBD | TBD | TBD | DEC-058 | TST-BOUNDARY | DEC-058 | PARTIAL: pnpm workspace and `check:boundaries` for domain packages (P1-B1). Checker parses with the pinned TypeScript AST and rejects ambient globals, eval, and the Function constructor in domain code (P1-B1.1) |
-| FR-P06-005 | FIDE article classes | TBD | TBD | Game | CHESS_RULES_AUTHORITY_PACK_V1 | TST-RULE | DEC-051 | NOT_STARTED |
+| FR-P06-005 | FIDE article classes | TBD | TBD | Game | CHESS_RULES_AUTHORITY_PACK_V1 | TST-RULE | DEC-051 | PARTIAL: Articles 3.1–3.10.2 movement and legality in `domain/chess-rules` (attacks, legal moves, transition, perft) (P1-B2). SAN, GameResult, termination, and 3.10.3 reachability not started |
 | FR-P06-006 | Dead position partial | TBD | TBD | GameResult | mating research | TST-RULE | DEC-062; DEC-064 | PARTIAL: whole-position detector for the hand-proven set only (P1-B1). Not wired to any result. Accepts only a canonical `Position` (P1-B1.1) |
 | FR-P06-007 | Draw and resign contracts | TBD | TBD | Game | ClaimDrawCommand.v1; OfferDrawCommand.v1; RespondDrawOfferCommand.v1; ResignGameCommand.v1 | TST-COMMAND | DEC-051 | NOT_STARTED |
 | FR-P06-008 | Event ordering | TBD | TBD | ClockState | LIVE_GAME_EVENT_ORDERING_V1 | TST-CLOCK | DEC-061; DEC-063 | NOT_STARTED |

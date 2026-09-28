@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { H50_TEXT, splitPlies } from "./fixtures/claim-histories.ts";
@@ -37,6 +37,22 @@ describe("Golden ledger coverage", () => {
     const block = /\*\*History H50[^`]*```text\r?\n([\s\S]*?)```/.exec(LEDGER);
     expect(block).not.toBeNull();
     expect(splitPlies(block?.[1] ?? "")).toEqual(splitPlies(H50_TEXT));
+  });
+
+  it("every IMPLEMENTED or PARTIAL row is named by an executable test", () => {
+    const testDir = fileURLToPath(new URL(".", import.meta.url));
+    const titles = readdirSync(testDir)
+      .filter((name) => name.endsWith(".test.ts") && name !== "ledger-status.test.ts")
+      .flatMap((name) => [
+        ...readFileSync(`${testDir}${name}`, "utf8").matchAll(
+          /\bit(?:\.each\([^)]*\))?\(\s*"([^"]+)"/g,
+        ),
+      ])
+      .map((match) => match[1] ?? "");
+    const namedIds = new Set(titles.flatMap((title) => title.split(/[^\w-]+/)));
+    for (const [id, entry] of Object.entries(LEDGER_STATUS)) {
+      if (entry.status !== "NOT_IMPLEMENTED") expect(namedIds.has(id), id).toBe(true);
+    }
   });
 
   describe("NOT_IMPLEMENTED ledger rows (reported as todo, never as passing)", () => {

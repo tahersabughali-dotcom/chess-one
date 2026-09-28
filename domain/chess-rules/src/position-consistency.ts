@@ -1,17 +1,20 @@
 import {
   type Color,
   fileIndex,
+  oppositeColor,
   type PieceKind,
   rankIndex,
   SQUARES,
   type Square,
   squareAt,
 } from "@chess-one/game-values";
+import { findKing, isInCheck } from "./attacks.ts";
 import { type Position, pieceAt } from "./position.ts";
 
 export type ConsistencyIssue =
   | "pawn_on_back_rank"
   | "kings_adjacent"
+  | "non_moving_side_in_check"
   | "castling_right_without_king"
   | "castling_right_without_rook"
   | "en_passant_wrong_rank"
@@ -23,10 +26,6 @@ function holds(position: Position, square: Square, color: Color, kind: PieceKind
   return piece !== null && piece.color === color && piece.kind === kind;
 }
 
-function kingSquare(position: Position, color: Color): Square | undefined {
-  return SQUARES.find((square) => holds(position, square, color, "king"));
-}
-
 function checkPawns(position: Position, issues: ConsistencyIssue[]): void {
   const onBackRank = SQUARES.some((square) => {
     const rank = rankIndex(square);
@@ -36,9 +35,8 @@ function checkPawns(position: Position, issues: ConsistencyIssue[]): void {
 }
 
 function checkKings(position: Position, issues: ConsistencyIssue[]): void {
-  const white = kingSquare(position, "white");
-  const black = kingSquare(position, "black");
-  if (white === undefined || black === undefined) return;
+  const white = findKing(position, "white");
+  const black = findKing(position, "black");
   const fileGap = Math.abs(fileIndex(white) - fileIndex(black));
   const rankGap = Math.abs(rankIndex(white) - rankIndex(black));
   if (fileGap <= 1 && rankGap <= 1) issues.push("kings_adjacent");
@@ -84,15 +82,17 @@ function checkEnPassant(position: Position, issues: ConsistencyIssue[]): void {
 }
 
 /**
- * Basic consistency beyond FEN structure. This is not a legality or
- * reachability proof (Article 3.10.3). It does not yet detect whether the side
- * that is not to move stands in check, because attack detection belongs to the
- * move engine that later batches build.
+ * Basic consistency beyond FEN structure. This is a partial check, not a
+ * legality or reachability proof (Article 3.10.3). The side to move may be in
+ * check; the side that just moved may not (Article 3.9).
  */
 export function checkPositionConsistency(position: Position): readonly ConsistencyIssue[] {
   const issues: ConsistencyIssue[] = [];
   checkPawns(position, issues);
   checkKings(position, issues);
+  if (isInCheck(position, oppositeColor(position.sideToMove))) {
+    issues.push("non_moving_side_in_check");
+  }
   checkCastling(position, issues);
   checkEnPassant(position, issues);
   return Object.freeze(issues);

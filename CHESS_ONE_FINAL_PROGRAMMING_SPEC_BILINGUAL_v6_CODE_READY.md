@@ -7,7 +7,10 @@
 **CURRENT EXECUTION STATUS / حالة التنفيذ الحالية:** the status line above is historical for Phase 0.6.  
 - Phase 1 is opened for controlled, owner-authorized batches only. / المرحلة 1 مفتوحة لدفعات محكومة يأذن بها المالك فقط.
 - Phase 1 Batch 1 (foundation bootstrap) is completed. / الدفعة 1 مكتملة.
-- Batch 2 is NOT authorized until the Batch 1.1 hardening review passes. / الدفعة 2 غير مأذونة حتى تنجح مراجعة الدفعة 1.1.
+- Batch 1.1 (foundation hardening) was independently reviewed and passed. / الدفعة 1.1 روجعت مراجعة مستقلة ونجحت.
+- Batch 2 (standard chess move-legality core) is authorized and in progress. / الدفعة 2 مأذونة وقيد التنفيذ.
+- Batch 3 is NOT authorized. / الدفعة 3 غير مأذونة.
+- ENV-NODE-001 remains open: local Node is below the reviewed 24.21.0 LTS baseline. / ENV-NODE-001 ما زال مفتوحًا.
 - v5 remains historical and unchanged. / v5 تاريخي ولا يُعدَّل.
 - All open gates remain binding. / كل البوابات المفتوحة ما زالت ملزمة.
 - Progress is recorded in `PHASE_1_IMPLEMENTATION_LOG.md`. / التقدم مسجل في سجل تنفيذ المرحلة 1.

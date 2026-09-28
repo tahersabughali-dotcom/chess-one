@@ -1,9 +1,14 @@
 /**
- * Batch 1 status of every row in CHESS_RULES_GOLDEN_TEST_LEDGER_V1.md.
+ * Status of every row in CHESS_RULES_GOLDEN_TEST_LEDGER_V1.md after Batch 2.
  * IMPLEMENTED: the row's expected behaviour is asserted.
  * PARTIAL: part of the expected behaviour is asserted; `pending` says what is not.
  * NOT_IMPLEMENTED: no behaviour is asserted. `fixtureValidated` means its FEN or
  * history is checked for integrity, which is not the row's behaviour.
+ *
+ * The ledger's IllegalMove and InvalidState are asserted as the pure-domain
+ * errors `illegal_move`, `promotion_required`, and `promotion_unexpected`;
+ * mapping them to contract errors is a later layer. Every IMPLEMENTED or
+ * PARTIAL row must be named by an executable test (ledger-status.test.ts).
  */
 export type LedgerStatus =
   | { readonly status: "IMPLEMENTED" }
@@ -15,30 +20,35 @@ const notImplemented = (fixtureValidated = false): LedgerStatus => ({
   fixtureValidated,
 });
 
-const DRAW_RESULT_PENDING = "draw `dead_position` needs GameResult, which is not in Batch 1";
+const DRAW_RESULT_PENDING = "draw `dead_position` needs GameResult, which is not implemented";
+const SAN_PENDING = "server SAN is not implemented";
+const implemented: LedgerStatus = { status: "IMPLEMENTED" };
+const partial = (pending: string): LedgerStatus => ({ status: "PARTIAL", pending });
 
 export const LEDGER_STATUS: Readonly<Record<string, LedgerStatus>> = {
-  "TST-RULE-E01-001": notImplemented(true),
-  "TST-RULE-E01-002": notImplemented(true),
-  "TST-RULE-E01-003": notImplemented(true),
-  "TST-RULE-E01-004": notImplemented(true),
-  "TST-RULE-E01-005": notImplemented(true),
-  "TST-RULE-E01-006": notImplemented(true),
-  "TST-RULE-E01-007": notImplemented(true),
-  "TST-RULE-E01-008a": notImplemented(true),
-  "TST-RULE-E01-008b": notImplemented(true),
-  "TST-RULE-E01-009": notImplemented(true),
-  "TST-RULE-E01-010": notImplemented(true),
-  "TST-RULE-E01-011a": notImplemented(true),
-  "TST-RULE-E01-011b": notImplemented(true),
-  "TST-RULE-E01-011c": notImplemented(true),
-  "TST-RULE-E01-011d": notImplemented(true),
-  "TST-RULE-E01-012": notImplemented(true),
-  "TST-RULE-E01-013": notImplemented(true),
-  "TST-RULE-E01-014a": { status: "PARTIAL", pending: DRAW_RESULT_PENDING },
-  "TST-RULE-E01-014b": { status: "PARTIAL", pending: DRAW_RESULT_PENDING },
-  "TST-RULE-E01-014c": { status: "PARTIAL", pending: DRAW_RESULT_PENDING },
-  "TST-RULE-E01-014d": { status: "IMPLEMENTED" },
+  "TST-RULE-E01-001": partial(
+    `${SAN_PENDING}; game sequence +1 and terminal status need the game layer`,
+  ),
+  "TST-RULE-E01-002": implemented,
+  "TST-RULE-E01-003": implemented,
+  "TST-RULE-E01-004": implemented,
+  "TST-RULE-E01-005": implemented,
+  "TST-RULE-E01-006": implemented,
+  "TST-RULE-E01-007": implemented,
+  "TST-RULE-E01-008a": implemented,
+  "TST-RULE-E01-008b": partial(`${SAN_PENDING} (O-O-O)`),
+  "TST-RULE-E01-009": partial(`${SAN_PENDING} (en passant capture)`),
+  "TST-RULE-E01-010": implemented,
+  "TST-RULE-E01-011a": implemented,
+  "TST-RULE-E01-011b": partial(`${SAN_PENDING} (a8=Q)`),
+  "TST-RULE-E01-011c": partial(`${SAN_PENDING} (a8=N)`),
+  "TST-RULE-E01-011d": implemented,
+  "TST-RULE-E01-012": partial("terminal `white_win` by `checkmate` needs GameResult"),
+  "TST-RULE-E01-013": partial("terminal draw by `stalemate` needs GameResult"),
+  "TST-RULE-E01-014a": partial(DRAW_RESULT_PENDING),
+  "TST-RULE-E01-014b": partial(DRAW_RESULT_PENDING),
+  "TST-RULE-E01-014c": partial(DRAW_RESULT_PENDING),
+  "TST-RULE-E01-014d": implemented,
   "TST-RULE-E01-015a": notImplemented(true),
   "TST-RULE-E01-015b": notImplemented(),
   "TST-RULE-E01-015c": notImplemented(),

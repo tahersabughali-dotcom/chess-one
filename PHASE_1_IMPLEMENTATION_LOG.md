@@ -279,3 +279,141 @@ Residual limits. This is an architecture guard, not a sandbox. A computed key bu
 - Every Batch 1 rule gap remains: no move generation, legality, check detection, SAN, or perft; GAP-MATE-001 through 004 are open; and consistency does not detect a side not to move being in check.
 - ENV-NODE-001 is open until the owner authorizes a Node update.
 - The boundary checker depends on an upstream-unstable TypeScript API. Any TypeScript upgrade must re-run TST-BOUNDARY-001–019.
+
+## Batch 2: standard chess move-legality core
+
+Batch 3 is not authorized. This batch builds no SAN, PGN, GameResult, termination events, clocks, draw claims, repetition, adjudication, server, UI, database, engine search, or bitboards.
+
+### Baseline
+
+- `.gitignore` now ignores `CHESS_ONE_*_REVIEW*.zip`. `git check-ignore` confirmed it covers both review ZIPs.
+- `pnpm check` passed before the commit.
+- Batch 1.1 was committed locally as `00673df` "chore: harden phase 1 foundation", together with the `.gitignore` change. There is no remote and nothing was pushed. The tree was then clean except for the ignored ZIPs.
+- The Batch 2 changes are uncommitted, for review.
+
+### Modules (domain/chess-rules/src)
+
+| File | Responsibility | Exported from the package |
+|---|---|---|
+| `attacks.ts` | Geometric attack relation, king location, check | `isSquareAttacked`, `isInCheck`, `findKing` |
+| `move-generation.ts` | Pseudo-legal generation, castling paths, en passant victim | No, package-internal |
+| `move-transition.ts` | The one position transition: board, side, castling rights, en passant target, clocks | No, package-internal |
+| `legal-moves.ts` | King-safety filter and the public move API | `generateLegalMoves`, `applyLegalMove`, `LegalMoveError` |
+| `position-consistency.ts` | New issue `non_moving_side_in_check` | Unchanged export |
+
+Design notes:
+
+- Attack detection never consults legality, so a pinned piece still attacks and still gives check. Castling is not an attack.
+- A move is a `MoveIntent`. The transition derives the special effects from the board:
+  - castling is a king moving two files;
+  - en passant is a pawn moving diagonally onto an empty square;
+  - a double push is a pawn moving two ranks.
+- A pseudo-legal move is legal when, after `boardAfterMove`, the mover's king is not attacked. That single test covers pins, discovered attacks, blocks, captures of the checker, king moves, en passant exposure, and double check. There are no hard-coded pin rules.
+- Castling additionally requires the king's square, the crossed square, and the destination to be unattacked. The rook's squares and b1/b8 are not checked.
+- `applyLegalMove` examines only the candidates from the source square, through the same legality test, so it never regenerates the whole list. Error precedence is:
+  - an exact legal match is applied;
+  - `promotion_required`;
+  - `promotion_unexpected`;
+  - `illegal_move`.
+- The next position always comes from `createPosition`. A failure there throws as a programming defect.
+- Move order is source square index, then destination index, then promotion q, r, b, n. This is engineering behaviour, not a FIDE rule. Lists and moves are frozen.
+- Castling rights are only ever cleared: by a king move, or by any move from or to a rook's original square. A rook that returns never restores a right.
+- The en passant target is set after every two-square advance, which is the FEN convention, and cleared after any other move.
+- The halfmove clock resets after a pawn move or capture and otherwise increments. The fullmove number increments after Black moves.
+- `position-consistency.ts` now uses `findKing` instead of its own scan.
+
+### Article mapping
+
+| Articles | Rule | Evidence |
+|---|---|---|
+| 3.1 | No capture of an own piece; king never captured | TST-RULE-E01-003, TST-FOUND-MOVEPROP-002 |
+| 3.2–3.6 | Bishop, rook, queen, knight geometry and blocking | TST-FOUND-ATTACK-002–007, perft |
+| 3.7 | Pawn pushes, double push, captures | TST-FOUND-ATTACK-001, TST-RULE-E01-001/002, perft |
+| 3.7.3.1 | En passant | TST-RULE-E01-009/010, TST-FOUND-EP-001–003, TST-FOUND-TRANSITION-009 |
+| 3.7.3.3 | Promotion, no auto-queen, underpromotion | TST-RULE-E01-011a–d, TST-FOUND-PROMO-001–003, TST-FOUND-TRANSITION-010 |
+| 3.8, 3.9 | King moves, adjacency, check, legality | TST-RULE-E01-004/005/006, TST-FOUND-ATTACK-008–011, TST-FOUND-LEGAL-006 |
+| 3.8.2 | Castling rights, path, attacked squares | TST-RULE-E01-007/008a/008b, TST-FOUND-CASTLE-001–005, TST-FOUND-TRANSITION-004–008 |
+| 3.10.1–3.10.2 | Legal and illegal move definitions | `generateLegalMoves` / `applyLegalMove`, TST-FOUND-LEGAL-001–005 |
+| 5.1.1, 5.2.1 (condition only) | No legal move, with or without check | TST-RULE-E01-012/013 |
+
+3.10.3 reachability is not proven; `checkPositionConsistency` remains partial.
+
+### Ledger status changes
+
+- **IMPLEMENTED:** 002, 003, 004, 005, 006, 007, 008a, 010, 011a, 011d. The ledger's IllegalMove and InvalidState are asserted as the domain errors; the contract mapping comes later.
+- **PARTIAL:**
+  - 001: SAN, game sequence, and terminal status are pending.
+  - 008b, 009, 011b, 011c: SAN is pending.
+  - 012 and 013: GameResult is pending.
+- A new guard test requires every IMPLEMENTED or PARTIAL row to be named by an executable test.
+
+### Tests
+
+New test files:
+
+- `attacks.test.ts`: TST-FOUND-ATTACK-001–013. 012 compares against the independent test oracle on every golden position.
+- `legal-moves.test.ts`: the golden rows and TST-FOUND-LEGAL-001–006.
+- `special-moves.test.ts`: TST-FOUND-CASTLE, TST-FOUND-EP, TST-FOUND-PROMO.
+- `move-transition.test.ts`: TST-FOUND-TRANSITION-001–010.
+- `move-properties.property.test.ts`: TST-FOUND-MOVEPROP-001–004, fast-check.
+- `perft.test.ts`: TST-FOUND-PERFT.
+
+Test support: `positions.ts`, and `perft.ts` (perft and a divide helper, test-only).
+
+Property tests run bounded playouts of at most 40 plies from five start positions, with 60 runs (30 for the oracle comparison). They check:
+
+- every generated move applies;
+- the result is canonical, with one king each and the other side to move;
+- the mover is not in check afterwards;
+- there are no duplicates and no king captures;
+- the documented order holds;
+- generation is deterministic;
+- FEN round trips;
+- production attacks agree with the test oracle.
+
+A mutation check deliberately broke four rules in turn, and each was caught:
+
+| Injected bug | Failing tests |
+|---|---|
+| Castling crossed-square check removed | 5 |
+| En passant victim not removed | 7 |
+| Captured corner rook keeps its right | 1 |
+| Pawn attack direction flipped | 8 |
+
+### Perft
+
+The vectors come from the Chess Programming Wiki "Perft Results" tables. They are engineering regression oracles, not legal authority. All required depths match, with no special cases:
+
+| Position | Depths and nodes |
+|---|---|
+| Initial | 1, 20, 400, 8902, 197281 (depths 0–4) |
+| Kiwipete | 48, 2039, 97862 (depths 1–3) |
+| Position 3 | 14, 191, 2812, 43238 (depths 1–4) |
+| Position 4 | 6, 264, 9467 (depths 1–3) |
+
+Measured locally on the 64-cell board, with no timing assertion:
+
+| Run | Time |
+|---|---|
+| Initial depth 4 | about 2.5 s |
+| Kiwipete depth 3 | about 1.1 s |
+| Position 3 depth 4 | about 0.6 s |
+| Whole rules suite | about 5 s |
+
+No bitboards.
+
+### Gates and supply chain
+
+- 18 test files: 241 passed, 0 failed, 0 skipped, 29 todo. All 29 todo entries are NOT_IMPLEMENTED ledger rows.
+- typecheck, lint, format:check, check:boundaries, test, test:rules, and check pass.
+- Dependencies added: 0. `package.json` and `pnpm-lock.yaml` are unchanged.
+- No casts, ts-ignore, or ts-expect-error. Domain code uses no Date, randomness, I/O, or timers; the boundary checker passes.
+
+### Remaining gaps
+
+- No SAN, PGN, GameResult, checkmate or stalemate termination, draw claims, repetition, 50/75-move rules, or clocks.
+- 3.10.3 reachability is not proven.
+- The en passant field is still taken as written in FEN. Repetition identity will later need real capture availability.
+- Consistency does not check that the en passant target matches a real double push beyond the existing checks.
+- GAP-MATE-001 through 004 are open, and dead-position detection is not expanded.
+- ENV-NODE-001 is open. Node must be resolved before server or web work.
