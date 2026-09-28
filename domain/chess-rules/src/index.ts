@@ -13,6 +13,11 @@ export {
 export { type FenError, type FenErrorCode, formatFen, parseFen } from "./fen.ts";
 export { createInitialPosition } from "./initial-position.ts";
 export { applyLegalMove, generateLegalMoves, type LegalMoveError } from "./legal-moves.ts";
+export {
+  assessMatingCapability,
+  findMatingWitness,
+  type MatingCapability,
+} from "./mating-capability.ts";
 export { assessMatingPossibility, type MatingPossibility } from "./mating-possibility.ts";
 export {
   type Board,

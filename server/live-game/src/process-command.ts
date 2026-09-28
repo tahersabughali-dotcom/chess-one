@@ -3,24 +3,13 @@ import {
   type DrawClaim,
   type DrawClaimKind,
   evaluateDrawClaim,
-  formatFen,
   type Position,
   repetitionKey,
   toCanonicalSan,
 } from "@chess-one/chess-rules";
-import {
-  type MoveIntent,
-  nextGameSequence,
-  oppositeColor,
-  parseDurationMs,
-} from "@chess-one/game-values";
-import type {
-  ActiveGameState,
-  CommandResponse,
-  ResponseCode,
-  ResponseDetail,
-  UnauthorizedDetail,
-} from "./active-game.ts";
+import { type MoveIntent, oppositeColor, parseDurationMs } from "@chess-one/game-values";
+import type { ActiveGameState, UnauthorizedDetail } from "./active-game.ts";
+import { statusAfterFlag, statusAfterResignation } from "./adjudication.ts";
 import {
   addTime,
   type ClockState,
@@ -32,15 +21,25 @@ import {
   stopClock,
   type WallClockMs,
 } from "./clock.ts";
-import { findBinding, fingerprintOf, replayedResponse, withBinding } from "./command-identity.ts";
+import { findBinding, fingerprintOf, replayedResponse } from "./command-identity.ts";
+import { type LiveGameCommand, type ParsedCommand, parseCommand } from "./commands.ts";
 import {
-  type CommandName,
-  type LiveGameCommand,
-  type ParsedCommand,
-  parseCommand,
-} from "./commands.ts";
-import { type GameFinishedV1, gameFinished } from "./events.ts";
-import type { CommandId, ControlLeaseId, GameId, PlayerId, Seat } from "./ids.ts";
+  type Attempt,
+  type AuthorizedGameActor,
+  bindRejection,
+  boundCommitted,
+  type Changes,
+  type CommandDecision,
+  commit,
+  commitAndBind,
+  defect,
+  finishEvents,
+  type Ingress,
+  type JudgedAttempt,
+  NO_EVENTS,
+  reject,
+} from "./decision.ts";
+import type { GameFinishedV1 } from "./events.ts";
 import {
   type DrawRuleDetail,
   drawResult,
@@ -49,145 +48,11 @@ import {
   statusFromFacts,
 } from "./result.ts";
 
-/**
- * Trusted invocation context: the server resolves it from the authenticated
- * session and the current control lease. No command field can establish it.
- */
-export interface AuthorizedGameActor {
-  readonly gameId: GameId;
-  readonly playerId: PlayerId;
-  readonly seat: Seat;
-  readonly controlLeaseId: ControlLeaseId;
-}
-
-/** Trusted ingress facts stamped by the writer at receipt (DEC-061, DEC-063). */
-export interface Ingress {
-  readonly receivedAtMonotonicMs: MonotonicMs;
-  /** Audit only; never decides acceptance, a deadline, or a flag. */
-  readonly auditWallClockMs?: WallClockMs;
-}
-
-/** One atomic decision. The input state is never modified. */
-export interface CommandDecision {
-  readonly nextState: ActiveGameState;
-  readonly response: CommandResponse;
-  readonly events: readonly GameFinishedV1[];
-}
-
 export interface DeadlineDecision {
   readonly nextState: ActiveGameState;
   readonly flagged: boolean;
-}
-
-interface Attempt {
-  readonly state: ActiveGameState;
-  readonly actor: AuthorizedGameActor;
-  readonly ingress: Ingress;
-  readonly name: CommandName;
-  readonly commandId: CommandId | null;
-}
-
-interface JudgedAttempt extends Attempt {
-  readonly commandId: CommandId;
-  readonly fingerprint: string;
-}
-
-type Changes = Pick<ActiveGameState, "clock" | "status"> &
-  Partial<Pick<ActiveGameState, "position" | "history">>;
-
-const NO_EVENTS: readonly GameFinishedV1[] = Object.freeze([]);
-
-function defect(message: string): never {
-  throw new Error(`Live game defect: ${message}`);
-}
-
-function respond(
-  attempt: Attempt,
-  state: ActiveGameState,
-  code: ResponseCode,
-  detail: ResponseDetail | null,
-  san: string | null,
-): CommandResponse {
-  return Object.freeze({
-    gameId: state.gameId,
-    command: attempt.name,
-    clientCommandId: attempt.commandId,
-    code,
-    detail,
-    replayedResponse: false,
-    receivedAtMonotonicMs: attempt.ingress.receivedAtMonotonicMs,
-    sequence: state.sequence,
-    positionFen: formatFen(state.position),
-    san,
-    clock: state.clock,
-    status: state.status,
-  });
-}
-
-/** A rejection that does not decide the command: the state is returned unchanged. */
-function reject(
-  attempt: Attempt,
-  code: ResponseCode,
-  detail: ResponseDetail | null = null,
-): CommandDecision {
-  const response = respond(attempt, attempt.state, code, detail, null);
-  return Object.freeze({ nextState: attempt.state, response, events: NO_EVENTS });
-}
-
-/** Stores `response` as the binding decision of this seat and command id. */
-function bound(
-  attempt: JudgedAttempt,
-  state: ActiveGameState,
-  response: CommandResponse,
-  events: readonly GameFinishedV1[],
-): CommandDecision {
-  const { seat } = attempt.actor;
-  const nextState = withBinding(state, seat, attempt.commandId, attempt.fingerprint, response);
-  return Object.freeze({ nextState, response, events });
-}
-
-/** A binding rejection: only the command binding is added. */
-function bindRejection(
-  attempt: JudgedAttempt,
-  code: ResponseCode,
-  detail: ResponseDetail | null = null,
-): CommandDecision {
-  return bound(
-    attempt,
-    attempt.state,
-    respond(attempt, attempt.state, code, detail, null),
-    NO_EVENTS,
-  );
-}
-
-/** A committed transition advances the sequence by exactly one. */
-function commit(state: ActiveGameState, changes: Changes): ActiveGameState {
-  const sequence = nextGameSequence(state.sequence);
-  if (!sequence.ok) defect("sequence overflow");
-  return Object.freeze({ ...state, ...changes, sequence: sequence.value });
-}
-
-function commitAndBind(
-  attempt: JudgedAttempt,
-  changes: Changes,
-  code: ResponseCode,
-  detail: ResponseDetail | null,
-  san: string | null,
-): CommandDecision {
-  const committed = commit(attempt.state, changes);
-  const response = respond(attempt, committed, code, detail, san);
-  const events =
-    committed.status.kind === "finished"
-      ? Object.freeze([
-          gameFinished(
-            committed,
-            committed.status.result,
-            { command: attempt.name, seat: attempt.actor.seat, clientCommandId: attempt.commandId },
-            attempt.ingress.auditWallClockMs ?? null,
-          ),
-        ])
-      : NO_EVENTS;
-  return bound(attempt, committed, response, events);
+  /** `game.finished.v1` exactly when the flag produced a result; empty otherwise. */
+  readonly events: readonly GameFinishedV1[];
 }
 
 /** Commits a legal move: history grows by one key, then terminal facts decide the clock. */
@@ -275,22 +140,33 @@ function claimDraw(attempt: JudgedAttempt, claim: DrawClaim): CommandDecision {
 }
 
 /**
- * Article 6.9 via LIVE_GAME_EVENT_ORDERING_V1 section 3. The flagged side
- * loses unless its opponent cannot checkmate by any series of legal moves.
- * That is a one-sided question (GAP-MATE-004) that no reviewed function
- * answers: `assessMatingPossibility` judges the whole position and cannot
- * prove that this opponent can mate. Every flag is therefore
- * MATING_POSSIBILITY_UNRESOLVED, with no win, loss, draw, or game.finished.v1
- * (DEC-064). The flagged balance is zero and the clock stops.
+ * Article 5.1.2 via CONTRACT_CATALOG_V1 10.4 as corrected by LIVE-CONTRACT-001.
+ * A seat may resign on either turn. The active side is charged to receipt and
+ * the clock stops; the opponent's one-sided mating capability then decides the
+ * status in the same transition: a win by resignation, a draw
+ * `resign_no_mate_possible`, or MATING_POSSIBILITY_UNRESOLVED with no result.
+ * The response is `Accepted` in every case: the resignation is committed, and
+ * the status carries its outcome.
+ */
+function resignGame(attempt: JudgedAttempt): CommandDecision {
+  const { state } = attempt;
+  const charged = chargeToReceipt(state.clock, attempt.ingress.receivedAtMonotonicMs);
+  const status = statusAfterResignation(state.position, attempt.actor.seat);
+  return commitAndBind(attempt, { clock: stopClock(charged), status }, "Accepted", null, null);
+}
+
+/**
+ * Article 6.9 via LIVE_GAME_EVENT_ORDERING_V1 section 3, as corrected by
+ * LIVE-CONTRACT-001. The flagged balance is zero, the clock stops at `at`, and
+ * the opponent's one-sided mating capability decides the status in the same
+ * transition: a win on time, a draw `timeout_no_mate`, or
+ * MATING_POSSIBILITY_UNRESOLVED with no result (DEC-064). Every flag path, a
+ * late command or the writer's own deadline check, commits through here.
  */
 function flagTransition(state: ActiveGameState, at: MonotonicMs): ActiveGameState {
   return commit(state, {
     clock: flagActive(state.clock, at),
-    status: Object.freeze({
-      kind: "unresolved",
-      reason: "MATING_POSSIBILITY_UNRESOLVED",
-      flaggedSide: state.clock.activeSide,
-    }),
+    status: statusAfterFlag(state.position, state.clock.activeSide),
   });
 }
 
@@ -319,21 +195,26 @@ function authorizationFailure(
  *    unchanged; a different fingerprint is `InvalidCommandIdentity`;
  * 4. a finished game is `GameAlreadyFinished` (not bound); an unresolved game
  *    is rejected with its reason (not bound);
- * 5. the seat must be the side to move (`NotYourTurn`, bound);
+ * 5. a move or claim seat must be the side to move (`NotYourTurn`, bound); a
+ *    resignation is accepted on either turn;
  * 6. `expected_game_sequence` must be current (`StaleSequence`, not bound);
- * 7. deadline at `received_at`: a late command is not applied and commits the
- *    flag transition (`MoveReceivedAfterDeadline`, bound);
- * 8. legality through chess-rules, then the move or claim transition.
+ * 7. deadline at `received_at` for the active side: a late command is not
+ *    applied and commits the flag transition (`MoveReceivedAfterDeadline`,
+ *    bound). The flag fell before the command arrived, so a late resignation
+ *    is decided as that flag (LIVE-RESIGN-001);
+ * 8. legality through chess-rules, then the move, claim, or resignation.
  *
  * Every client command that reaches a committed transition (an accepted move,
- * a correct or incorrect claim, or a late command that commits the flag) is
- * bound in the same returned state, under the one lease-scoped fingerprint.
- * Replay comes before the finished and unresolved guards, so a stored decision
- * is still replayed after the game stops. A finished state is fully absorbing:
- * every later command returns the same state object, and no binding is added
- * after the finish. A rejected command changes no clock field: the server
- * clock keeps running from the turn anchor, so time before a rejection is
- * still charged by the next committed transition or flag.
+ * a correct or incorrect claim, a resignation, or a late command that commits
+ * the flag) is bound in the same returned state, under the one lease-scoped
+ * fingerprint, and a transition that finishes the game carries its one
+ * `game.finished.v1`. Replay comes before the finished and unresolved guards,
+ * so a stored decision is still replayed after the game stops, with no event.
+ * A finished state is fully absorbing: every later command returns the same
+ * state object, and no binding is added after the finish. A rejected command
+ * changes no clock field: the server clock keeps running from the turn anchor,
+ * so time before a rejection is still charged by the next committed
+ * transition or flag.
  */
 export function processCommand(
   state: ActiveGameState,
@@ -376,16 +257,19 @@ export function processCommand(
         : "TerminalPrecedenceUnresolved",
     );
   }
-  if (actor.seat !== state.position.sideToMove) return bindRejection(judged, "NotYourTurn");
+  const resigning = parsedCommand.kind === "resign_game";
+  if (!resigning && actor.seat !== state.position.sideToMove) {
+    return bindRejection(judged, "NotYourTurn");
+  }
   if (parsedCommand.expectedGameSequence !== state.sequence)
     return reject(attempt, "StaleSequence");
 
   const receivedAt = ingress.receivedAtMonotonicMs;
   if (!receiptTiming(state.clock, receivedAt).timely) {
     const flagged = flagTransition(state, receivedAt);
-    const response = respond(judged, flagged, "MoveReceivedAfterDeadline", null, null);
-    return bound(judged, flagged, response, NO_EVENTS);
+    return boundCommitted(judged, flagged, "MoveReceivedAfterDeadline", null, null);
   }
+  if (parsedCommand.kind === "resign_game") return resignGame(judged);
   return parsedCommand.kind === "submit_move"
     ? submitMove(judged, parsedCommand.move)
     : claimDraw(judged, parsedCommand.claim);
@@ -394,12 +278,21 @@ export function processCommand(
 /**
  * The writer's own deadline check at `observedAt`, a monotonic instant of its
  * clock domain, for a side that sends nothing. There is no client command, so
- * nothing is bound. Before the deadline, or once the game has stopped, the
- * state is returned unchanged.
+ * nothing is bound; a resolved flag carries one `game.finished.v1` with
+ * deadline provenance, stamped with the optional trusted audit wall clock.
+ * Before the deadline, or once the game has stopped, the state is returned
+ * unchanged with no event.
  */
-export function processDeadline(state: ActiveGameState, observedAt: MonotonicMs): DeadlineDecision {
+export function processDeadline(
+  state: ActiveGameState,
+  observedAt: MonotonicMs,
+  auditWallClockMs: WallClockMs | null = null,
+): DeadlineDecision {
   if (state.status.kind !== "active" || receiptTiming(state.clock, observedAt).timely) {
-    return Object.freeze({ nextState: state, flagged: false });
+    return Object.freeze({ nextState: state, flagged: false, events: NO_EVENTS });
   }
-  return Object.freeze({ nextState: flagTransition(state, observedAt), flagged: true });
+  const flaggedSide = state.clock.activeSide;
+  const nextState = flagTransition(state, observedAt);
+  const events = finishEvents(nextState, { writerDeadline: true, flaggedSide }, auditWallClockMs);
+  return Object.freeze({ nextState, flagged: true, events });
 }

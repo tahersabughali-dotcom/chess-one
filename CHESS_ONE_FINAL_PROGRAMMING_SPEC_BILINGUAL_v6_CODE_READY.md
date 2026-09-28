@@ -14,7 +14,7 @@
 - Toolchain maintenance (Node 24.21.0 LTS, pnpm 12.7.0) was reviewed, passed, and committed locally. / صيانة الأدوات روجعت ونجحت وحُفظت محليًا.
 - ENV-NODE-001 is resolved: the active runtime is Node 24.21.0 with pnpm 12.7.0. / ENV-NODE-001 محلول.
 - Batch 5 with corrections 5.1 and 5.2 (authoritative live game foundation, in memory, no transport or database) was reviewed, approved, and committed locally. / الدفعة 5 وتصحيحاتها روجعت واعتُمدت وحُفظت محليًا.
-- Batch 6 (one-sided mating capability) is authorized. Batch 7 is NOT authorized. / الدفعة 6 مأذونة، والدفعة 7 غير مأذونة.
+- Batch 6 (one-sided mating capability, timeout and resignation adjudication) with correction 6.1 is implemented, uncommitted, and awaiting review. Batch 7 is NOT authorized. / الدفعة 6 منفّذة وغير محفوظة وتنتظر المراجعة، والدفعة 7 غير مأذونة.
 - v5 remains historical and unchanged. / v5 تاريخي ولا يُعدَّل.
 - All open gates remain binding. / كل البوابات المفتوحة ما زالت ملزمة.
 - Progress is recorded in `PHASE_1_IMPLEMENTATION_LOG.md`. / التقدم مسجل في سجل تنفيذ المرحلة 1.
@@ -129,7 +129,7 @@ DEC-051 أصبح A في المرحلة 0.5 بخط الأساس `FIDE-E01-2023`. 
 | BR-035 | Critical-path code prefers clarity over a shorter obscure form. Dependencies need a written reason. Hidden cross-domain writes are forbidden. |
 | BR-036 | Elapsed game time uses server monotonic time up to command receipt. Processing after a timely receipt is not player time. Wall-clock time is for display and audit. |
 | BR-037 | Online disconnect, refresh, background, abandonment, premove, lag, spectator delay, and server-outage behavior are Chess One policy. They are not FIDE articles. |
-| BR-038 | A dead-position draw is emitted only for `PROVEN_DEAD`. A no-mate draw after resignation or flag needs a reviewed one-sided proof (GAP-MATE-004). `UNKNOWN` must not become a draw, a win, or a loss (DEC-064). |
+| BR-038 | A dead-position draw is emitted only for `PROVEN_DEAD`. A no-mate draw after resignation or flag needs a reviewed one-sided proof (GAP-MATE-004). `UNKNOWN` must not become a draw, a win, or a loss (DEC-064). Later approved correction (LIVE-CONTRACT-001, Phase 1 Batch 6): the flag or resignation result follows the opponent's one-sided capability, `PROVEN_CAN_MATE` a win for the opponent and `PROVEN_CANNOT_MATE` a no-mate draw, only for the reviewed classes of research section 9. Everything else stays `UNKNOWN` (GAP-MATE-004b). |
 
 ## 4. Requirements added / متطلبات مضافة
 

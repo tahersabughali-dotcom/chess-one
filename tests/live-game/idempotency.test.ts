@@ -5,6 +5,7 @@ import {
   type LiveGameCommand,
   parseCommand,
   processCommand,
+  type SubmitMoveCommandV1,
 } from "@chess-one/live-game";
 import { describe, expect, it } from "vitest";
 import {
@@ -155,9 +156,9 @@ describe("TST-LIVE late client commands are bound", () => {
 
 interface Checkmated {
   readonly finished: ActiveGameState;
-  readonly opening: LiveGameCommand;
+  readonly opening: SubmitMoveCommandV1;
   readonly openingResponse: CommandResponse;
-  readonly mate: LiveGameCommand;
+  readonly mate: SubmitMoveCommandV1;
   readonly mateResponse: CommandResponse;
   readonly time: number;
 }

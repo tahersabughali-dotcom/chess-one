@@ -14,17 +14,22 @@ export type DrawRuleDetail =
   | "threefold_claim"
   | "fifty_move_claim"
   | "fivefold"
-  | "seventy_five_move";
+  | "seventy_five_move"
+  | "timeout_no_mate"
+  | "resign_no_mate_possible";
 
 /**
- * Only outcomes that reviewed rules decide unambiguously. There is no result
- * for time, resignation, agreement, or abandonment yet. Coexisting draw facts
- * are all retained in listing order because no rule picks one detail.
+ * Only outcomes that reviewed rules decide unambiguously. A time or
+ * resignation result exists only when the opponent's one-sided mating
+ * capability is proven (LIVE-CONTRACT-001): a win when it can mate, a draw
+ * (`timeout_no_mate`, `resign_no_mate_possible`) when it cannot. There is no
+ * result for agreement or abandonment yet. Coexisting draw facts are all
+ * retained in listing order because no rule picks one detail.
  */
 export type GameResult =
   | {
       readonly resultCode: "white_win" | "black_win";
-      readonly terminationReason: "checkmate";
+      readonly terminationReason: "checkmate" | "time" | "resignation";
       readonly winner: Color;
     }
   | {
@@ -41,8 +46,9 @@ export type PositionFact =
 /**
  * `active` accepts commands. `finished` holds an immutable committed result.
  * `unresolved` stops play without an official result:
- * - MATING_POSSIBILITY_UNRESOLVED: a flag whose outcome depends on a mating
- *   question no reviewed function answers (DEC-064, GAP-MATE-004).
+ * - MATING_POSSIBILITY_UNRESOLVED: a flag or a resignation whose outcome
+ *   depends on the opponent's mating capability, which is `UNKNOWN` for this
+ *   position (DEC-064, GAP-MATE-004).
  * - TERMINAL_PRECEDENCE_UNRESOLVED: facts whose precedence is not approved.
  */
 export type GameStatus =
@@ -52,6 +58,11 @@ export type GameStatus =
       readonly kind: "unresolved";
       readonly reason: "MATING_POSSIBILITY_UNRESOLVED";
       readonly flaggedSide: Color;
+    }
+  | {
+      readonly kind: "unresolved";
+      readonly reason: "MATING_POSSIBILITY_UNRESOLVED";
+      readonly resigningSide: Color;
     }
   | {
       readonly kind: "unresolved";

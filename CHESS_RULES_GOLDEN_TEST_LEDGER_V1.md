@@ -81,6 +81,8 @@ The earlier 014d FEN `8/8/8/8/4k3/8/3NN3/4K3 w - - 0 1` had the knight on d2 att
 | TST-RULE-E01-016c | 5.1.1, 6.9 | A mating move | Receipt before deadline, apply finishes after the wall deadline | Checkmate. The processing interval is not deducted |
 | TST-RULE-E01-016d | 6.9 | Mating squares that arrive after the deadline | Receipt after deadline | Not checkmate. Flag result stands |
 
+**Later approved correction — LIVE-CONTRACT-001 (RESOLVED, Phase 1 Batch 6).** The rows above are kept as written. Where a row names the whole-position detector's `NOT_DEAD` (015b, 016a) or `UNKNOWN` (015c, 016e) as its state, the deciding criterion is now the opponent's one-sided capability, `assessMatingCapability(position, opponent)` (`CONTRACT_CATALOG_V1.md` section 10.5). A loss for the resigning or flagging side needs `PROVEN_CAN_MATE`; a draw `resign_no_mate_possible` or `timeout_no_mate` needs `PROVEN_CANNOT_MATE`; `UNKNOWN` stays `MATING_POSSIBILITY_UNRESOLVED`. The whole-position detector never returns `NOT_DEAD`, so rows 015b and 016a are asserted with the corrected criterion. Row 015a's `InvalidState` is SUPERSEDED by LIVE-CONTRACT-006 (RESOLVED, Batch 6.1): a new resignation after the game has finished is `GameAlreadyFinished`, because a finished game is absorbing and every new unbound command meets the same terminal guard. Per-row status is in `tests/rules/fixtures/ledger-status.ts`.
+
 ## 9. Draws and claims / التعادل والمطالبات
 
 | Test | Article | State | Action | Expected |

@@ -7,11 +7,19 @@ import type { CommandId, GameId, PlayerId, Seat } from "./ids.ts";
 import type { GameResult } from "./result.ts";
 
 /** The command that closed the game. */
-export interface FinishProvenance {
+export interface CommandFinishProvenance {
   readonly command: CommandName;
   readonly seat: Seat;
   readonly clientCommandId: CommandId;
 }
+
+/** The writer's own deadline check closed the game: no client command, no seat binding. */
+export interface DeadlineFinishProvenance {
+  readonly writerDeadline: true;
+  readonly flaggedSide: Seat;
+}
+
+export type FinishProvenance = CommandFinishProvenance | DeadlineFinishProvenance;
 
 /**
  * Domain shape of `game.finished.v1` (CONTRACT_CATALOG_V1 section 5), produced

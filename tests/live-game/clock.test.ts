@@ -112,10 +112,12 @@ describe("TST-LIVE server clock and received_at", () => {
     expect(decision.nextState.position).toBe(game.position);
   });
 
-  it("TST-LIVE-066 UNKNOWN or unproven mating possibility never becomes a win, loss, or draw on time (DEC-064)", () => {
+  it("TST-LIVE-066 an UNKNOWN opponent mating capability never becomes a win, loss, or draw on time (DEC-064)", () => {
     for (const fen of [
-      "4k3/8/8/8/8/8/8/Q3K3 b - - 0 1",
-      "4k3/8/8/8/8/8/8/Q3K3 w - - 0 1",
+      // Black flags; White's queen can be taken by the only legal reply, so no line is proven.
+      "k7/1Q6/8/8/8/8/8/7K b - - 0 1",
+      // White flags; Black owns a pawn as well as its king, outside every proven class.
+      "4k3/4p3/8/8/8/8/4P3/R3K3 w - - 0 1",
       "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
     ]) {
       const game = newGame({ startPosition: positionOf(fen), initialMs: SHORT_MS });
@@ -126,6 +128,7 @@ describe("TST-LIVE server clock and received_at", () => {
         reason: "MATING_POSSIBILITY_UNRESOLVED",
         flaggedSide: game.position.sideToMove,
       });
+      expect(flagged.events, fen).toEqual([]);
       expect(flagged.nextState.sequence).toBe(1);
     }
   });
@@ -136,7 +139,7 @@ describe("TST-LIVE server clock and received_at", () => {
     expect(processDeadline(game, ms(DEADLINE - 1)).nextState).toBe(game);
     const flagged = processDeadline(game, ms(DEADLINE + 1)).nextState;
     const again = processDeadline(flagged, ms(DEADLINE + 10_000));
-    expect(again).toEqual({ nextState: flagged, flagged: false });
+    expect(again).toEqual({ nextState: flagged, flagged: false, events: [] });
     const mated = playMoves(newGame(), ["f2f3", "e7e5", "g2g4", "d8h4"]).state;
     expect(mated.status.kind).toBe("finished");
     expect(processDeadline(mated, ms(START_MS + 10_000_000)).nextState).toBe(mated);
@@ -179,7 +182,7 @@ describe("TST-LIVE server clock and received_at", () => {
     expect(dead.status).toMatchObject({ kind: "finished" });
     expect(dead.clock).toMatchObject({ running: false, anchorMs: START_MS + 10 });
     const far = START_MS + 10 * INITIAL_MS;
-    expect(processDeadline(dead, ms(far))).toEqual({ nextState: dead, flagged: false });
+    expect(processDeadline(dead, ms(far))).toEqual({ nextState: dead, flagged: false, events: [] });
     const late = submit(dead, moveCommand(dead, "e1d2"), far);
     expect(late.response).toMatchObject({ code: "GameAlreadyFinished" });
     expect(late.nextState).toBe(dead);

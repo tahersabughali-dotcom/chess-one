@@ -20,10 +20,14 @@ import {
   type PlayerId,
 } from "./ids.ts";
 
-/** Versioned command names (CONTRACT_CATALOG_V1 sections 2 and 10.1). */
+/** Versioned command names (CONTRACT_CATALOG_V1 sections 2, 10.1, and 10.4). */
 export const SUBMIT_MOVE_COMMAND_V1 = "SubmitMoveCommand.v1";
 export const CLAIM_DRAW_COMMAND_V1 = "ClaimDrawCommand.v1";
-export type CommandName = typeof SUBMIT_MOVE_COMMAND_V1 | typeof CLAIM_DRAW_COMMAND_V1;
+export const RESIGN_GAME_COMMAND_V1 = "ResignGameCommand.v1";
+export type CommandName =
+  | typeof SUBMIT_MOVE_COMMAND_V1
+  | typeof CLAIM_DRAW_COMMAND_V1
+  | typeof RESIGN_GAME_COMMAND_V1;
 
 const CONTRACT_VERSION = "1";
 
@@ -62,7 +66,12 @@ export interface ClaimDrawCommandV1 extends CommandEnvelopeInput {
   readonly promotionPiece?: string;
 }
 
-export type LiveGameCommand = SubmitMoveCommandV1 | ClaimDrawCommandV1;
+/** CONTRACT_CATALOG_V1 10.4: no move fields. The server decides the outcome. */
+export interface ResignGameCommandV1 extends CommandEnvelopeInput {
+  readonly command: typeof RESIGN_GAME_COMMAND_V1;
+}
+
+export type LiveGameCommand = SubmitMoveCommandV1 | ClaimDrawCommandV1 | ResignGameCommandV1;
 
 /** Shape failures, answered as `InvalidState` before any authority or identity check. */
 export type CommandShapeError =
@@ -88,7 +97,8 @@ interface ParsedEnvelope {
 
 export type ParsedCommand =
   | (ParsedEnvelope & { readonly kind: "submit_move"; readonly move: MoveIntent })
-  | (ParsedEnvelope & { readonly kind: "claim_draw"; readonly claim: DrawClaim });
+  | (ParsedEnvelope & { readonly kind: "claim_draw"; readonly claim: DrawClaim })
+  | (ParsedEnvelope & { readonly kind: "resign_game" });
 
 /** Case and surrounding whitespace are normalized; an empty promotion is the same as none. */
 function parseIntent(
@@ -142,6 +152,9 @@ export function parseCommand(command: LiveGameCommand): Result<ParsedCommand, Co
   if (command.command === SUBMIT_MOVE_COMMAND_V1) {
     const move = parseIntent(command.fromSquare, command.toSquare, command.promotionPiece);
     return move.ok ? ok({ ...envelope.value, kind: "submit_move", move: move.value }) : move;
+  }
+  if (command.command === RESIGN_GAME_COMMAND_V1) {
+    return ok({ ...envelope.value, kind: "resign_game" });
   }
   const claim = parseClaim(command);
   return claim.ok ? ok({ ...envelope.value, kind: "claim_draw", claim: claim.value }) : claim;

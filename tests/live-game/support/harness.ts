@@ -20,6 +20,8 @@ import {
   type MonotonicMs,
   type PlayerId,
   processCommand,
+  RESIGN_GAME_COMMAND_V1,
+  type ResignGameCommandV1,
   type Seat,
   SUBMIT_MOVE_COMMAND_V1,
   type SubmitMoveCommandV1,
@@ -160,6 +162,23 @@ export function claimCommand(
     expectedGameSequence: state.sequence,
     claimKind,
     ...(intended === undefined ? {} : squares(intended)),
+    ...fields,
+  };
+}
+
+/** A well-formed resignation by `seat`, on either turn. */
+export function resignCommand(
+  state: ActiveGameState,
+  seat: Seat,
+  fields: Partial<ResignGameCommandV1> = {},
+): ResignGameCommandV1 {
+  return {
+    command: RESIGN_GAME_COMMAND_V1,
+    contractVersion: "1",
+    gameId: state.gameId,
+    clientCommandId: `${seat}-${state.sequence}-resign`,
+    controlLeaseId: state.controlLeases[seat],
+    expectedGameSequence: state.sequence,
     ...fields,
   };
 }

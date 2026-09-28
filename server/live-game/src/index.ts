@@ -28,10 +28,18 @@ export {
   type LiveGameCommand,
   type ParsedCommand,
   parseCommand,
+  RESIGN_GAME_COMMAND_V1,
+  type ResignGameCommandV1,
   SUBMIT_MOVE_COMMAND_V1,
   type SubmitMoveCommandV1,
 } from "./commands.ts";
-export type { FinishProvenance, GameFinishedV1 } from "./events.ts";
+export type { AuthorizedGameActor, CommandDecision, Ingress } from "./decision.ts";
+export type {
+  CommandFinishProvenance,
+  DeadlineFinishProvenance,
+  FinishProvenance,
+  GameFinishedV1,
+} from "./events.ts";
 export {
   type CommandId,
   type ControlLeaseId,
@@ -43,14 +51,7 @@ export {
   type PlayerId,
   type Seat,
 } from "./ids.ts";
-export {
-  type AuthorizedGameActor,
-  type CommandDecision,
-  type DeadlineDecision,
-  type Ingress,
-  processCommand,
-  processDeadline,
-} from "./process-command.ts";
+export { type DeadlineDecision, processCommand, processDeadline } from "./process-command.ts";
 export type {
   DrawRuleDetail,
   GameResult,

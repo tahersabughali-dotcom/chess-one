@@ -37,7 +37,8 @@
 
 1. ثبّت `received_at`.
 2. احسب الموعد من رصيد المقعد عند بدء النوبة زائد الزمن الرتيب المنقضي حتى الاستلام. الزمن بعد الاستلام لا يدخل.
-3. إذا كان `received_at` بعد الموعد: لا تُطبَّق النقلة ولا المطالبة كحركة. نتيجة العلم حسب المادة 6.9 ووثيقة إمكانية الكش مات: `NOT_DEAD` خسارة بالوقت، وإثبات أن الخصم لا يستطيع الكش مات تعادل `timeout_no_mate` (فحص من طرف واحد، GAP-MATE-004). إن أعادت الدالة `UNKNOWN` فالحالة `MATING_POSSIBILITY_UNRESOLVED`: لا فوز ولا خسارة ولا تعادل رسمي، ولا `game.finished.v1` (DEC-064). سياسة الحسم النهائية بوابة لاحقة.
+3. إذا كان `received_at` بعد الموعد: لا تُطبَّق النقلة ولا المطالبة كحركة. نتيجة العلم حسب المادة 6.9 ووثيقة إمكانية الكش مات: `NOT_DEAD` خسارة بالوقت، وإثبات أن الخصم لا يستطيع الكش مات تعادل `timeout_no_mate` (فحص من طرف واحد، GAP-MATE-004). إن أعادت الدالة `UNKNOWN` فالحالة `MATING_POSSIBILITY_UNRESOLVED`: لا فوز ولا خسارة ولا تعادل رسمي، ولا `game.finished.v1` (DEC-064). سياسة الحسم النهائية بوابة لاحقة.  
+   *Superseded wording (Phase 0), on "`NOT_DEAD` → loss on time":* **later approved correction LIVE-CONTRACT-001 (RESOLVED, Phase 1 Batch 6)**, normative text in `CONTRACT_CATALOG_V1.md` section 10.5. The flag is decided by the flagged side's opponent's one-sided capability, `assessMatingCapability(position, opponent)`: `PROVEN_CAN_MATE` is a loss on time for the flagged side, `PROVEN_CANNOT_MATE` is a draw `timeout_no_mate`, and `UNKNOWN` stays `MATING_POSSIBILITY_UNRESOLVED` with no result and no event. The writer's own deadline check uses the same rule. A resolved flag emits `game.finished.v1` once, in the transition that commits it. / الحسم حسب قدرة الخصم وحده.
 4. إذا كان `received_at` في الموعد أو قبله: الأمر في الوقت. أكمل الفحص حتى لو تجاوزت ساعة الحائط الموعد أثناء الفحص. الخصم هو الفرق حتى `received_at` فقط.
 5. نقلة في الوقت تنهي المباراة بكش مات: السبب `checkmate` (المادة 5.1.1)، لا العلم.
 6. نقلة في الوقت تُنتج باتًا: `stalemate`.

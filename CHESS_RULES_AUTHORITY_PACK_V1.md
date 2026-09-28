@@ -98,6 +98,8 @@
 | RULE-022 | 9.5.3 | Incorrect claim | False threefold or fifty | No draw. Opponent +120000 ms. Legal indicated move is then played. Illegal indicated move is not | Not an abandonment timer | TST-RULE-E01-022 |
 | RULE-023 | 9.2.3 | Repetition identity | History of rights and ep | Same squares with different castling rights are not the same position. Ep availability likewise | — | TST-RULE-E01-023 |
 
+**Later approved correction — LIVE-CONTRACT-001 (RESOLVED, Phase 1 Batch 6, 2026-09-28).** The wording "NOT_DEAD: loss" in RULE-015 and RULE-016, and "Draw only on `PROVEN_DEAD`" for 5.1.2 in section 1, is superseded and kept above as written. Timeout and resignation are decided by the opponent's one-sided capability `assessMatingCapability(position, opponent)`: `PROVEN_CAN_MATE` is a win for the opponent (`time` or `resignation`), `PROVEN_CANNOT_MATE` is a draw (`timeout_no_mate` or `resign_no_mate_possible`), and `UNKNOWN` is `MATING_POSSIBILITY_UNRESOLVED` with no official result (DEC-064). The one-sided check exists for the reviewed classes of `MATING_POSSIBILITY_AND_DEAD_POSITION_RESEARCH_V1.md` section 9 only; everything else is `UNKNOWN`. Normative text: `CONTRACT_CATALOG_V1.md` section 10.5. / تصحيح معتمد لاحق: الحسم حسب قدرة الخصم وحده.
+
 ## 3. Unknowns left open / ما بقي مجهولًا
 
 - GAP-MATE-001 وGAP-MATE-002 وGAP-MATE-003 في وثيقة إمكانية الكش مات.

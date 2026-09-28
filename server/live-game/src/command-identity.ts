@@ -11,18 +11,21 @@ function moveText(move: MoveIntent | undefined): string {
  * CONTRACT_CATALOG_V1 2.6 and 10: the semantic payload after normalization,
  * as canonical text rather than a hash, so equality is exact. It binds the
  * command name and version, `game_id`, the control lease, and the move or
- * claim fields. The lease has already been checked against the seat's current
- * lease, so a controller under a replacement lease never receives a decision
- * stored for an earlier lease. It never includes client time, client SAN,
- * `actor_id`, `expected_game_sequence`, or `client_command_id`, which is the
- * lookup key together with the seat.
+ * claim fields; a resignation has no further fields. The lease has already
+ * been checked against the seat's current lease, so a controller under a
+ * replacement lease never receives a decision stored for an earlier lease. It
+ * never includes client time, client SAN, `actor_id`,
+ * `expected_game_sequence`, or `client_command_id`, which is the lookup key
+ * together with the seat.
  */
 export function fingerprintOf(command: ParsedCommand): string {
+  const envelope = `${command.name} ${command.gameId} ${command.controlLeaseId}`;
+  if (command.kind === "resign_game") return envelope;
   const payload =
     command.kind === "submit_move"
       ? moveText(command.move)
       : `${command.claim.kind} ${moveText("intended" in command.claim ? command.claim.intended : undefined)}`;
-  return `${command.name} ${command.gameId} ${command.controlLeaseId} ${payload}`;
+  return `${envelope} ${payload}`;
 }
 
 /** The binding decision stored for this seat and client command id, if any. */

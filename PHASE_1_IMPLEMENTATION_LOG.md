@@ -1099,3 +1099,173 @@ Batch 5, 5.1, and 5.2 passed independent review and were approved by the owner o
 - **Exact deadline** is recorded in `PHASE_0_DECISION_CHANGELOG.md` section 13 as a clarification of DEC-061 and DEC-063: `received_at <= deadline` is timely, and `received_at > deadline` is late. The receipt is in the writer's monotonic domain, and processing after receipt is not player time.
 - **LIVE-CONTRACT-001** stays OPEN with an approved direction (changelog section 13): the timeout and resignation question is one-sided (can the opponent of the flagging or resigning player mate by any legal series?). Whole-position `NOT_DEAD` is not sufficient. `MATING_POSSIBILITY_UNRESOLVED` stays mandatory until that is proven. Batch 6 is authorized to resolve it.
 - **Known documentation inconsistency, not changed here:** `CONTRACT_CATALOG_V1.md` 2.6 and `PHASE_0_5_CONTRACT_CORRECTIONS.md` section 3 still list `control_lease_id` outside the fingerprint. The owner-approved Batch 5.1 correction binds the lease. The closure instruction limited contract edits to LIVE-CONTRACT-004, so this remains for an explicit owner amendment.
+
+## PHASE 1 / BATCH 6 — ONE-SIDED MATING CAPABILITY
+
+Owner-authorized. Baseline is the Batch 5 commit `d152afc` ("feat: add authoritative live game foundation"). Batch 6 is uncommitted, for review. No remote, no push. Batch 7 is not authorized.
+
+### Owner decisions taken during the batch
+
+- **King and bishop, or king and knight, against a lone king:** the request listed these as `PROVEN_CAN_MATE`. That is false; no cooperative mate exists. Asked and decided: `PROVEN_CANNOT_MATE` for the minor-piece side, backed by an exhaustive in-repo test. Test titles say "no cooperative mate exists".
+- **Lease fingerprint documentation:** amend. `CONTRACT_CATALOG_V1.md` 2.6.2 and `PHASE_0_5_CONTRACT_CORRECTIONS.md` section 3 now record the Batch 5.1 lease-scoped fingerprint as LIVE-CONTRACT-005 (RESOLVED), with the old wording kept and marked superseded. This closes the "known documentation inconsistency" of the Batch 5 closure.
+
+### Chess rules: `assessMatingCapability`
+
+- **API** (`@chess-one/chess-rules`):
+  - `assessMatingCapability(position, matingColor, history?)` returns `"PROVEN_CAN_MATE" | "PROVEN_CANNOT_MATE" | "UNKNOWN"` (*superseded by Batch 6.1: the `history` parameter is removed*);
+  - `findMatingWitness(position, matingColor, history?)` returns a verified line or `null` (*same*);
+  - type `MatingCapability`.
+- The question is existential and cooperative: can `matingColor` mate by any legal series of moves? It is not forced mate or an evaluation. It never reuses whole-position `PROVEN_DEAD` / `NOT_DEAD`.
+- **Classes** (proofs in research section 9):
+  - `PROVEN_CANNOT_MATE`: `matingColor` owns only its king, whatever the opponent owns. Also king and one bishop, or one knight, against a lone king. The proof is the geometric argument plus TST-RULE-CAP-004/005, which enumerate every placement of king and piece against a lone king in check; none is mate.
+  - `PROVEN_CAN_MATE`: king and queen, king and rook, or king and two knights against a lone king, **only** when a verified witness line exists.
+  - `UNKNOWN`: everything else. That includes any opponent material, other mating material, forced capture, stalemate, the 75-move boundary, and a history that does not end at the position. (*Superseded by Batch 6.1: the 75-move boundary and history no longer affect the answer.*)
+- **Witness:** `mating-witness.ts` (package-internal) runs a deterministic best-first search, at most 1,500 expansions for each of 4 frames (2 corners by 2 orientations). It refuses king captures of the mating piece, halfmove 150, and positions whose history count would reach five. Every line is re-verified by `isVerifiedMatingLine`: legal moves, no terminal state or automatic draw before the end, and checkmate by `matingColor` at the end. (*Superseded by Batch 6.1: the halfmove, fivefold, and automatic-draw conditions are removed.*) The search is sound, not complete. No tablebase, retrograde analysis, engine, SAT solver, whole-chess brute force, or external library is used.
+- **No material table.** Counterexample: White Kh1 Qb7 against Black Ka8 to move has only Kxb7, so the answer is `UNKNOWN`. Opponent blockers can enable mates (`kn6/1B6/1K6/8/8/8/8/8 b`), so any opponent material is `UNKNOWN`.
+- Exports pass TST-FOUND-MATE-002 (no result, finish, adjudication, or termination names).
+
+### Live game: timeout and resignation adjudication
+
+- **Shared authority:** `adjudication.ts`, with `statusAfterFlag` and `statusAfterResignation`. Both evaluate `assessMatingCapability(position, opponent, state.history)` (*Batch 6.1: now `assessMatingCapability(position, opponent)`*):
+
+| Capability of the opponent | Flag | Resignation |
+|---|---|---|
+| `PROVEN_CAN_MATE` | opponent wins, `terminationReason: "time"` | opponent wins, `"resignation"` |
+| `PROVEN_CANNOT_MATE` | draw, `draw_rule`, `timeout_no_mate` | draw, `draw_rule`, `resign_no_mate_possible` |
+| `UNKNOWN` | unresolved MATING_POSSIBILITY_UNRESOLVED, `flaggedSide` | unresolved, `resigningSide` |
+
+- **Flag paths:** `flagTransition` is used by both the late-command branch and `processDeadline`. The flagged balance is 0 and the clock stops at the receipt or observation instant.
+- **Events:**
+  - A resolved flag or resignation emits exactly one `game.finished.v1`, in the committing decision. An unresolved stop emits none.
+  - A command-caused finish carries command provenance `{command, seat, clientCommandId}`. A writer-deadline finish carries `{writerDeadline: true, flaggedSide}`, and `processDeadline(state, observedAt, auditWallClockMs = null)` stamps the optional audit time.
+  - `DeadlineDecision` is now `{nextState, flagged, events}`.
+- **Late command:** the response stays `MoveReceivedAfterDeadline` while `status` carries the adjudicated result. It is bound and committed once. An exact replay returns the original response with `replayedResponse: true`, the same state object, and no event.
+- **`ResignGameCommand.v1`:** no move fields. The fingerprint is command version, `game_id`, and lease only. Processing order:
+  1. shape;
+  2. authority (seat, player, lease, `actor_id`);
+  3. identity (replay, or `InvalidCommandIdentity`);
+  4. finished guard (`GameAlreadyFinished`, non-binding) and unresolved guard;
+  5. **no turn check**;
+  6. sequence (`StaleSequence`, unbound);
+  7. deadline;
+  8. timely: the active side is charged to receipt, the clock stops, and the status comes from `statusAfterResignation`. The response is `Accepted` in all three outcomes, and the status tells which one.
+- **Policy gap LIVE-RESIGN-001** (not stated by the documents, implemented narrowly for owner review; *RESOLVED in Batch 6.1*):
+  - a resignation is accepted on either turn;
+  - a resignation received after the active side's deadline is not a resignation. The flag fell first, so it is committed and adjudicated as a flag (`MoveReceivedAfterDeadline`, bound).
+- **LIVE-CONTRACT-006 (OPEN; *RESOLVED in Batch 6.1 as `GameAlreadyFinished`*):** contract 10.4 and ledger 015a expect `InvalidState` for a resignation after a 5.2.2 finish. The implementation answers `GameAlreadyFinished` (non-binding, LIVE-CONTRACT-004). Nothing is applied either way.
+
+### Structure
+
+- `process-command.ts` went from 405 to 298 lines. The decision-assembly helpers moved to a new `decision.ts` (173 lines): the actor, ingress and decision types, `respond`, `reject`, `bound`, `bindRejection`, `commit`, `commitAndBind`, `boundCommitted`, and `finishEvents`. `process-command.ts` now owns command routing and the move, claim, resignation, and flag transitions. `adjudication.ts` (73 lines) owns the capability-to-status rule.
+- `mating-witness.ts` (323 lines) is the largest source file. It is one cohesive search-and-verify unit.
+
+### Documents
+
+- **LIVE-CONTRACT-001 RESOLVED:**
+  - `CONTRACT_CATALOG_V1.md` new 10.5, with 10.4's first bullet marked superseded;
+  - `LIVE_GAME_EVENT_ORDERING_V1.md` section 3;
+  - `CHESS_RULES_AUTHORITY_PACK_V1.md`, `TEST_ARCHITECTURE_AND_GATES_V1.md`, and `CHESS_RULES_GOLDEN_TEST_LEDGER_V1.md`, each with a later-correction note and the original text kept;
+  - BR-038 in the v6 spec.
+- **Research:** `MATING_POSSIBILITY_AND_DEAD_POSITION_RESEARCH_V1.md` new section 9 (predicate, classes, proofs, witness, asymmetric pair). GAP-MATE-004 is split into 004a (reviewed classes, RESOLVED) and 004b (general algorithm, OPEN). Section 4 (`PROVEN_DEAD`) is not widened. No claim of complete adjudication.
+- **Changelog:** `PHASE_0_DECISION_CHANGELOG.md` section 14.
+- **Traceability:** FR-GM-002, 003, and 009 extended. FR-P06-007 moved to PARTIAL.
+
+### Golden rows 015 and 016
+
+| Row | Status | Test |
+|---|---|---|
+| 015a | PARTIAL (*IMPLEMENTED in Batch 6.1*) | TST-LIVE-133. Nothing applied, no binding; the code is `GameAlreadyFinished`, not `InvalidState` (LIVE-CONTRACT-006) |
+| 015b | IMPLEMENTED | TST-LIVE-130, under the corrected criterion (opponent `PROVEN_CAN_MATE`) |
+| 015c | IMPLEMENTED | TST-LIVE-132 |
+| 016a | IMPLEMENTED | TST-LIVE-120, under the corrected criterion; the whole-position detector never returns `NOT_DEAD` |
+| 016b, 016c, 016e | IMPLEMENTED | unchanged; 016e is also covered by TST-LIVE-125 |
+| 016d | IMPLEMENTED | TST-LIVE-122 (the flag result stands as a draw) and TST-LIVE-070 (unresolved) |
+
+### Tests
+
+- **Rules:**
+  - TST-RULE-CAP-001 to 013 (unit);
+  - CAP-020 to 023 (properties). CAP-023 covers colour-swap asymmetry and no mutation.
+- **Live game:**
+  - TST-LIVE-120 to 125, timeout, including the mandatory asymmetric pair (121) and flag replay (123);
+  - TST-LIVE-130 to 139, resignation outcomes, idempotency, fingerprint, protections, and late resignation;
+  - TST-LIVE-140 to 141, properties. They check the flag and resignation outcome against the capability, that UNKNOWN never yields a result, absorption, and no second event on replay, and they assert that both proven outcomes were exercised.
+- **Updated for the approved behaviour change, not weakened:**
+  - TST-LIVE-066 now uses positions whose opponent capability really is UNKNOWN; its K+Q positions resolve and are asserted in 120 and 121;
+  - TST-LIVE-067 and 071 now expect `events: []` on `DeadlineDecision`;
+  - the idempotency test's `Checkmated` fields are typed as `SubmitMoveCommandV1`.
+- Perft (1/20/400/8902/197281, Kiwipete 48/2039/97862, position 3 14/191/2812/43238, position 4 6/264/9467), SAN, repetition, and draw tests are unchanged. The only diff under `tests/rules` against `d152afc` is `fixtures/ledger-status.ts`.
+
+### Gates (Node 24.21.0, pnpm 12.7.0, TypeScript 7.0.2)
+
+- typecheck, lint, format:check, check:boundaries, test, test:rules, check, and audit all pass (exit 0). Audit: no known vulnerabilities.
+- 36 test files: 400 passed, 0 failed, 0 skipped, 3 todo (ledger rows 017a to 017c, draw offers).
+  - rules: 291 passed and 3 todo;
+  - boundaries: 24;
+  - live-game: 85.
+- Dependencies added: 0. `package.json`, `pnpm-lock.yaml`, and the package manifests are unchanged. No cast, `ts-ignore`, `ts-expect-error`, or `biome-ignore` was added.
+
+### Remaining gaps
+
+- GAP-MATE-004b: no general one-sided algorithm. Every position outside the reviewed classes is `UNKNOWN` and stays unresolved.
+- GAP-MATE-001: the product policy for `UNKNOWN` is still undecided.
+- LIVE-CONTRACT-006 (OPEN) and LIVE-RESIGN-001 (policy gap) need owner review. (*Both resolved in Batch 6.1.*)
+- Draw offers and agreement, abort, persistence, outbox, transport, and reconnect are not built.
+
+## PHASE 1 / BATCH 6.1 — MATING CAPABILITY SEMANTICS CORRECTION
+
+Owner-directed correction after the independent Batch 6 review. Baseline `d152afc`. Batch 6 and 6.1 are uncommitted. No remote, no push. Batch 7 is not authorized. No change to move legality, SAN, repetition, the 50/75-move implementation, or dependencies.
+
+### Root cause
+
+The Batch 6 witness treated game-ending draw rules as part of the capability predicate. `searchFrame` skipped any child with `halfmoveClock >= 150` and any position whose history count would reach five. `isVerifiedMatingLine` rejected a line through `evaluateAutomaticDraws`, and the public API took the game's repetition history. Articles 5.1.2 and 6.9 ask whether a player can checkmate by any possible series of legal moves (Article 3.10.1, through Articles 3.1 to 3.9). Repetition and the seventy-five-move rule end an ongoing game; they do not decide whether such a series exists. Symptom: the same king-and-queen board with the lone king to move answered `PROVEN_CAN_MATE` at halfmove 0 but `UNKNOWN` at 149, so a flag there would have been left unresolved instead of lost.
+
+### Fix
+
+- **API:** `assessMatingCapability(position, matingColor)` and `findMatingWitness(position, matingColor)`. The `history` parameter is removed; passing one is now a type error.
+- **Witness search:** no halfmove bound and no repetition count. Deduplication by placement, side to move, and rights is kept as a search optimization only.
+- **Verification** (`isVerifiedMatingLine(position, matingColor, line)`):
+  - every move is legal through `applyLegalMove`;
+  - no position before the last is checkmate or stalemate (`evaluateMoveExhaustion`), so no move is played after either;
+  - the last position is checkmate won by `matingColor`;
+  - `repetitionCount`, `evaluateAutomaticDraws`, and the halfmove clock are not used.
+- **Live game:** `statusAfterFlag(position, side)` and `statusAfterResignation(position, side)` no longer receive history. Both flag paths still share `flagTransition`. Timeout, replay, and event behaviour are unchanged.
+- **Classes unchanged:**
+  - only a king, and king and one bishop or one knight against a lone king: `PROVEN_CANNOT_MATE`;
+  - king and queen, king and rook, king and two knights against a lone king: `PROVEN_CAN_MATE` only with a verified witness;
+  - everything else: `UNKNOWN`.
+- `mating-witness.ts` is now 308 lines (323 before).
+
+### Regressions
+
+- **TST-RULE-CAP-010, replaced.** The old test ("a line never runs past the seventy-five-move limit") encoded the wrong semantics. The new test: the same boards (king and queen with either side to move, and a black king and rook) at halfmove 0, 20, and 149 all answer `PROVEN_CAN_MATE`, and the witness from halfmove 149 replays to mate. **Red before the fix:** halfmove 149 gave `UNKNOWN`.
+- **TST-RULE-CAP-011, replaced.** The old stale-history test was removed with the parameter. The new test reaches the same king-and-queen position through repetition cycles up to its 6th occurrence, past fivefold, and gets the same answers (White `PROVEN_CAN_MATE`, Black `PROVEN_CANNOT_MATE`) and the same witness as the fresh position.
+- **TST-LIVE-126, new.** A game whose history holds the current position four times, and a game at halfmove 149, both adjudicate a Black flag as a White win on time, like a fresh game. The halfmove-149 case gave MATING_POSSIBILITY_UNRESOLVED before the fix.
+- **TST-RULE-CAP-023** no longer passes a history; the no-mutation check on the position remains.
+- The 75-move and fivefold tests in draw rules and the live game are unchanged.
+
+### Owner decisions recorded
+
+- **LIVE-CONTRACT-006 RESOLVED:** a new resignation after the game has finished is `GameAlreadyFinished`, non-binding. The `InvalidState` wording in `CONTRACT_CATALOG_V1.md` 10.4 and ledger row 015a is marked SUPERSEDED. Row 015a is now IMPLEMENTED (TST-LIVE-133), and its `resign_no_mate_possible` note is covered by TST-LIVE-131.
+- **LIVE-RESIGN-001 RESOLVED:** a player may resign on either turn. `received_at <= active-side deadline` means the resignation is processed; later means the flag came first and is adjudicated. Contract 10.5. TST-LIVE-139 covers both seats on both sides of the deadline; TST-LIVE-130 covers the opponent's turn.
+- **GAP-MATE-004b stays OPEN.** The search is bounded and incomplete, and `UNKNOWN` remains required.
+
+### Documents
+
+- `CONTRACT_CATALOG_V1.md` 10.4 and 10.5;
+- `CHESS_RULES_GOLDEN_TEST_LEDGER_V1.md` correction note;
+- `MATING_POSSIBILITY_AND_DEAD_POSITION_RESEARCH_V1.md` sections 9.1 to 9.4, with the Batch 6 wording marked superseded;
+- `PHASE_0_DECISION_CHANGELOG.md` section 15;
+- `TRACEABILITY_MATRIX_V2.md` summary and FR-P06-007 (no status change);
+- the v6 status line;
+- superseded markers in the Batch 6 section above.
+
+### Gates (Node 24.21.0, pnpm 12.7.0)
+
+- typecheck, lint, format:check, check:boundaries, test, test:rules, check, and audit all pass (exit 0). Audit: no known vulnerabilities.
+- 36 files: 401 passed, 0 failed, 0 skipped, 3 todo.
+  - rules: 291 passed and 3 todo;
+  - boundaries: 24;
+  - live-game: 86.
+- Perft, SAN, repetition, and draw-rule tests are unchanged.
+- Dependencies added: 0. No cast or suppression was added.

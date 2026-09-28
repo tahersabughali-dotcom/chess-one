@@ -94,7 +94,8 @@
 ### 2.6 Idempotency and stale behavior / التكرار والتسلسل القديم
 
 البصمة الدلالية للأمر هي: `game_id` + `from_square` + `to_square` + `promotion_piece` بعد تطبيع الحالة والفراغ.  
-خارج البصمة: `client_observed_at` و`client_san` و`actor_id` و`expected_game_sequence` و`session_id` و`control_lease_id`.
+خارج البصمة: `client_observed_at` و`client_san` و`actor_id` و`expected_game_sequence` و`session_id` و`control_lease_id`.  
+*Superseded wording (Phase 0.5) on one point:* `control_lease_id` is no longer outside the fingerprint. See 2.6.2 (LIVE-CONTRACT-005).
 
 قرار مُلزِم هو: `Accepted` أو `IllegalMove` أو `NotYourTurn` أو `InvalidState` على أمر مكتمل الشكل وصل إلى حكم.  
 `StaleSequence` و`Unauthorized` لا يقفلان المعرّف، لأنهما لا يحسمان النقلة ولا يكتبان حالة. `GameAlreadyFinished` لا يقفل المعرّف (LIVE-CONTRACT-004، القسم 2.6.1).  
@@ -122,6 +123,24 @@ For a game whose status is already finished:
 Reason: a finished game is an absorbing state. A post-terminal binding protects no authoritative transition, and storing one for every new id would let a client grow the binding store without limit after the game ends.
 
 المباراة المنتهية حالة ماصّة. الأمر الجديد بعد النهاية يُرفض بـ `GameAlreadyFinished` دون تخزين قرار مُلزِم ودون أي تغيير في الحالة. الأمر المُلزِم سابقًا يُعاد قراره الأصلي، والبصمة المختلفة `InvalidCommandIdentity`.
+
+### 2.6.2 Later approved correction — LIVE-CONTRACT-005, lease-scoped fingerprint (RESOLVED) / تصحيح معتمد لاحق
+
+Approved by the owner in the Phase 1 Batch 5.1 review and recorded here in Batch 6 (2026-09-28). This corrects the "outside the fingerprint" list in 2.6 above, which is kept as superseded wording.
+
+The semantic fingerprint includes the normalized authoritative `control_lease_id`, after authorization has checked it against the seat's current lease:
+
+| Command | Fingerprint |
+|---|---|
+| `SubmitMoveCommand.v1` | command name and version, `game_id`, `control_lease_id`, normalized `from_square`, `to_square`, `promotion_piece` |
+| `ClaimDrawCommand.v1` | command name and version, `game_id`, `control_lease_id`, `claim_kind`, and the normalized intended move when present |
+| `ResignGameCommand.v1` | command name and version, `game_id`, `control_lease_id` only |
+
+Still outside the fingerprint: `client_observed_at`, `client_san`, `actor_id`, `expected_game_sequence`, `session_id`, and `client_command_id` (the lookup key together with the seat).
+
+Reason: without the lease, a controller holding a replacement lease could send an earlier `client_command_id` with the same payload and receive, as a replay, a decision stored under the earlier lease. With it, that command is `InvalidCommandIdentity` with no execution; the same id, payload, and original lease still replays.
+
+البصمة تشمل عقد التحكم بعد التحقق منه. جهاز بعقد بديل لا يستلم قرارًا خُزّن تحت عقد سابق.
 
 ### 2.7 Critical-path ban / ممنوعات المسار الحرج
 
@@ -251,7 +270,8 @@ SQ-DGM-10 يبقى صحيحًا كقدرة: لعب ثم طلب تثبيت ثم �
 
 ## 10. Draw, offer, and resignation commands / أوامر التعادل والاستقالة
 
-هذه أوامر توثيق فقط. لا تنفيذ في هذه الدفعة. كلها أوامر سلطة المباراة الحية. العميل لا يرسل نتيجة، ولا FEN، ولا SAN كسلطة.
+هذه أوامر توثيق فقط. لا تنفيذ في هذه الدفعة. كلها أوامر سلطة المباراة الحية.  
+*Later status:* `ClaimDrawCommand.v1` (Phase 1 Batch 5) and `ResignGameCommand.v1` (Batch 6) are implemented in the pure in-memory live-game authority. Offer and response commands are not. العميل لا يرسل نتيجة، ولا FEN، ولا SAN كسلطة.
 
 الحقول المشتركة مع `SubmitMoveCommand.v1`: `contract_version`, `game_id`, `session_id`, `control_lease_id`, `client_command_id`, `expected_game_sequence`, و`actor_id` الاختياري للمطابقة فقط. ترتيب السلطة في القسم 2.1 ينطبق. `replayed_response` ينطبق. البصمة تشمل نوع الأمر وحقوله الدلالية، لا وقت العميل.
 
@@ -295,3 +315,26 @@ SQ-DGM-10 يبقى صحيحًا كقدرة: لعب ثم طلب تثبيت ثم �
 - `NOT_DEAD`: المقعد المستقيل يخسر.
 - إثبات أن الخصم لا يستطيع الكش مات بأي سلسلة: تعادل، والتفصيل `resign_no_mate_possible`. هذا فحص من طرف واحد غير موجود بعد (GAP-MATE-004). موضع `PROVEN_DEAD` كله انتهى أصلًا بالمادة 5.2.2، فالاستقالة فيه `InvalidState`.
 - `UNKNOWN`: `MATING_POSSIBILITY_UNRESOLVED`. لا فوز ولا خسارة ولا تعادل رسمي، ولا `game.finished.v1` (DEC-064).
+
+*Superseded wording (Phase 0), on the first bullet:* the whole-position `NOT_DEAD` criterion is replaced by 10.5. *Superseded wording (Phase 0), on the second bullet:* "فالاستقالة فيه `InvalidState`" (a resignation there is `InvalidState`) is SUPERSEDED by LIVE-CONTRACT-006 (RESOLVED) below: the response is `GameAlreadyFinished`.
+
+### 10.5 Later approved correction — LIVE-CONTRACT-001, one-sided adjudication of time and resignation (RESOLVED) / تصحيح معتمد لاحق
+
+Approved direction recorded after the Phase 1 Batch 5 review; implemented and resolved in Phase 1 Batch 6 (2026-09-28). This corrects 10.4 above and the "`NOT_DEAD` → loss on time" wording in `LIVE_GAME_EVENT_ORDERING_V1.md` section 3.
+
+When player X flags (6.9) or resigns (5.1.2), let Y be X's opponent. The question is one-sided: can Y checkmate X by any possible series of legal moves (Article 3.10.1) from the current position? `assessMatingCapability(position, Y)` in `@chess-one/chess-rules` answers it. The answer depends on the position alone. Repetition history, fivefold repetition, the halfmove clock, and the seventy-five-move rule end an ongoing game; they do not decide whether such a series exists, and they are not inputs (Phase 1 Batch 6.1 correction).
+
+| Capability of Y | Flag | Resignation |
+|---|---|---|
+| `PROVEN_CAN_MATE` | Y wins, `termination_reason = time` | Y wins, `termination_reason = resignation` |
+| `PROVEN_CANNOT_MATE` | Draw, `draw_rule`, `timeout_no_mate` | Draw, `draw_rule`, `resign_no_mate_possible` |
+| `UNKNOWN` | `MATING_POSSIBILITY_UNRESOLVED`, no result, no `game.finished.v1` | Same |
+
+- Whole-position `NOT_DEAD` is not sufficient: it does not say which side can mate. In K+Q versus K, if the queen side flags, the lone king cannot mate and the result is a draw, not a loss.
+- `UNKNOWN` stays mandatory and first-class. It is never mapped to a win, loss, or draw (DEC-064). Not every position is decided: see research section 9.
+- A resolved flag or resignation commits once, emits `game.finished.v1` once in the same decision, and is bound to the client command that caused it. A flag found by the writer's own deadline check has no client command and binds nothing.
+- **LIVE-RESIGN-001 (RESOLVED, owner-approved in Batch 6.1):** a player may resign on either turn. A resignation received at or before the active side's deadline (`received_at <= deadline`) is timely and processed as a resignation. One received after it (`received_at > deadline`) is not: the active side's flag occurred first, and timeout adjudication takes precedence (`MoveReceivedAfterDeadline`, bound). No other ordering applies.
+
+**LIVE-CONTRACT-006 (RESOLVED, owner-approved in Batch 6.1):** a new resignation command that arrives after the game has already finished, for example as a dead position under 5.2.2, is answered `GameAlreadyFinished`, a non-binding rejection, not `InvalidState`. Reason: a terminal game state is absorbing, and every new unbound command meets the same terminal guard (2.6.1, LIVE-CONTRACT-004). The `InvalidState` wording in 10.4 is SUPERSEDED.
+
+عند سقوط علم X أو استقالته، يُسأل: هل يستطيع الخصم Y الكش مات بأي سلسلة قانونية؟ نعم مُثبتة: فوز Y. لا مُثبتة: تعادل. غير معروف: `MATING_POSSIBILITY_UNRESOLVED` بلا نتيجة.

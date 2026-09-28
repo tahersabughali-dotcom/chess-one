@@ -111,6 +111,8 @@
 | Fivefold | 9.6.1 | Automatic draw. Detail `fivefold` |
 | Seventy-five moves | 9.6.2 | Automatic draw, except a checkmate on that move still wins. Detail `seventy_five_move` |
 
+**Later approved correction — LIVE-CONTRACT-001 (RESOLVED, Phase 1 Batch 6).** In the Flag row, "`NOT_DEAD` is a loss on time" is superseded wording, kept as written. Flag and resignation are both decided by the opponent's one-sided capability (`CONTRACT_CATALOG_V1.md` section 10.5): `PROVEN_CAN_MATE` is a loss for the flagging or resigning side, `PROVEN_CANNOT_MATE` is a draw (`timeout_no_mate` or `resign_no_mate_possible`), and `UNKNOWN` is `MATING_POSSIBILITY_UNRESOLVED` with no result. The Resignation row states the same rule and is unchanged.
+
 خارج مسار أمر النقلة، وتبقى في المصدر للرجوع لا كسلوك مكتبة القواعد:
 
 - اللمس والتحريك المادي، المادة 4.

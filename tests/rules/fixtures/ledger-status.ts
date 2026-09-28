@@ -20,9 +20,17 @@
  * asserted there through `processCommand`. Rows 014a-c are asserted by a live
  * king capture that reaches the ledger's exact piece placement (fullmove 2
  * instead of 1), because a live game refuses to start in a finished position.
- * Resignation, draw offers, and any flag result that needs a one-sided mating
- * proof (GAP-MATE-004) are not implemented. Every IMPLEMENTED or PARTIAL row
- * must be named by an executable test (ledger-status.test.ts).
+ *
+ * Batch 6 adds `assessMatingCapability` and adjudicates flags and
+ * resignations by the opponent's one-sided capability (LIVE-CONTRACT-001
+ * resolved). Rows 015b and 016a name a whole-position `NOT_DEAD` proof as
+ * their precondition; that criterion is superseded, and they are asserted
+ * with the corrected one, the opponent's PROVEN_CAN_MATE (the whole-position
+ * detector never returns `NOT_DEAD`). Row 015a's `InvalidState` is
+ * superseded by `GameAlreadyFinished` (LIVE-CONTRACT-006, resolved in Batch
+ * 6.1). Draw offers are not implemented. Every
+ * IMPLEMENTED or PARTIAL row must be named by an executable test
+ * (ledger-status.test.ts).
  */
 export type LedgerStatus =
   | { readonly status: "IMPLEMENTED" }
@@ -35,7 +43,6 @@ const notImplemented = (fixtureValidated = false): LedgerStatus => ({
 });
 
 const implemented: LedgerStatus = { status: "IMPLEMENTED" };
-const partial = (pending: string): LedgerStatus => ({ status: "PARTIAL", pending });
 
 export const LEDGER_STATUS: Readonly<Record<string, LedgerStatus>> = {
   "TST-RULE-E01-001": implemented,
@@ -59,15 +66,13 @@ export const LEDGER_STATUS: Readonly<Record<string, LedgerStatus>> = {
   "TST-RULE-E01-014b": implemented,
   "TST-RULE-E01-014c": implemented,
   "TST-RULE-E01-014d": implemented,
-  "TST-RULE-E01-015a": notImplemented(true),
-  "TST-RULE-E01-015b": notImplemented(),
-  "TST-RULE-E01-015c": notImplemented(),
-  "TST-RULE-E01-016a": notImplemented(),
+  "TST-RULE-E01-015a": implemented,
+  "TST-RULE-E01-015b": implemented,
+  "TST-RULE-E01-015c": implemented,
+  "TST-RULE-E01-016a": implemented,
   "TST-RULE-E01-016b": implemented,
   "TST-RULE-E01-016c": implemented,
-  "TST-RULE-E01-016d": partial(
-    "the move is not applied and is not checkmate; the flag is committed as MATING_POSSIBILITY_UNRESOLVED because no one-sided mating check exists (GAP-MATE-004), so no flag result stands",
-  ),
+  "TST-RULE-E01-016d": implemented,
   "TST-RULE-E01-016e": implemented,
   "TST-RULE-E01-017a": notImplemented(),
   "TST-RULE-E01-017b": notImplemented(),
