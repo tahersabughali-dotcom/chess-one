@@ -40,13 +40,17 @@ describe("Golden ledger coverage", () => {
   });
 
   it("every IMPLEMENTED or PARTIAL row is named by an executable test", () => {
-    const testDir = fileURLToPath(new URL(".", import.meta.url));
-    const titles = readdirSync(testDir)
-      .filter((name) => name.endsWith(".test.ts") && name !== "ledger-status.test.ts")
-      .flatMap((name) => [
-        ...readFileSync(`${testDir}${name}`, "utf8").matchAll(
-          /\bit(?:\.each\([^)]*\))?\(\s*"([^"]+)"/g,
-        ),
+    const testDirs = ["./", "../live-game/"].map((dir) =>
+      fileURLToPath(new URL(dir, import.meta.url)),
+    );
+    const titles = testDirs
+      .flatMap((dir) =>
+        readdirSync(dir)
+          .filter((name) => name.endsWith(".test.ts") && name !== "ledger-status.test.ts")
+          .map((name) => `${dir}${name}`),
+      )
+      .flatMap((path) => [
+        ...readFileSync(path, "utf8").matchAll(/\bit(?:\.each\([^)]*\))?\(\s*"([^"]+)"/g),
       ])
       .map((match) => match[1] ?? "");
     const namedIds = new Set(titles.flatMap((title) => title.split(/[^\w-]+/)));

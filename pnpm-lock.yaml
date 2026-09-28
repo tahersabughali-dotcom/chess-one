@@ -190,7 +190,28 @@ importers:
 
   domain/game-values: {}
 
+  server/live-game:
+    dependencies:
+      '@chess-one/chess-rules':
+        specifier: workspace:*
+        version: link:../../domain/chess-rules
+      '@chess-one/game-values':
+        specifier: workspace:*
+        version: link:../../domain/game-values
+
   tests/boundaries: {}
+
+  tests/live-game:
+    devDependencies:
+      '@chess-one/chess-rules':
+        specifier: workspace:*
+        version: link:../../domain/chess-rules
+      '@chess-one/game-values':
+        specifier: workspace:*
+        version: link:../../domain/game-values
+      '@chess-one/live-game':
+        specifier: workspace:*
+        version: link:../../server/live-game
 
   tests/rules:
     devDependencies:

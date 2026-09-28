@@ -56,6 +56,8 @@ UCI يبقى ترميزًا يولّده الخادم من الحقول الثل
 قرار مُلزِم: `Accepted`, `IllegalMove`, `NotYourTurn`, `GameAlreadyFinished`, أو `InvalidState` بعد أن وصل الأمر مكتمل الشكل إلى حكم.  
 `StaleSequence` لا يحرق المعرّف، حتى يستطيع العميل إعادة نفس المعرّف بعد المزامنة.
 
+**Later approved correction — LIVE-CONTRACT-004 (RESOLVED, 2026-09-28, after the Phase 1 Batch 5.2 review):** `GameAlreadyFinished` is removed from the binding decisions above. A new, previously unbound command against a finished game is a non-binding `GameAlreadyFinished`: it stores no binding and changes no state, and it emits no event. An already bound id is still checked first: the same fingerprint replays the original response, and a different fingerprint is `InvalidCommandIdentity`. The normative text is `CONTRACT_CATALOG_V1.md` section 2.6.1. The line above is kept as the Phase 0.5 wording, now superseded on this one point. / تصحيح معتمد لاحق: `GameAlreadyFinished` لم يعد قرارًا مُلزِمًا.
+
 ## 4. Authenticated actor / الفاعل المصادَق
 
 `actor_id` القادم من العميل ليس إثباتًا. المقعد يُستنتج من الجلسة وعقد التحكم والمباراة. المعرّف المرسل إما يطابق هذا المقعد أو يُرفض بـ `Unauthorized`. العميل لا يختار المقعد ولا لون القطع كحقل سلطة.

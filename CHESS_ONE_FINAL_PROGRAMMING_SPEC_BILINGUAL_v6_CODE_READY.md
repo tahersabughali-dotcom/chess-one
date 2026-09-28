@@ -11,8 +11,10 @@
 - Batch 2 (standard chess move-legality core) was independently reviewed, passed, and committed locally. / الدفعة 2 روجعت ونجحت وحُفظت محليًا.
 - Batch 3 (canonical SAN and checkmate/stalemate rule facts) was independently reviewed, passed, and committed locally. / الدفعة 3 روجعت ونجحت وحُفظت محليًا.
 - Batch 4 and review correction 4.1 (repetition identity, draw claims, fivefold, 50/75-move rules) were independently reviewed, passed, and committed locally. / الدفعة 4 والتصحيح 4.1 روجعا ونجحا وحُفظا محليًا.
-- Batch 5 is NOT authorized. / الدفعة 5 غير مأذونة.
-- ENV-NODE-001 is resolved: local Node is 24.21.0 LTS, and pnpm is 12.7.0 (toolchain maintenance 2026-09-28, uncommitted pending review). / ENV-NODE-001 محلول.
+- Toolchain maintenance (Node 24.21.0 LTS, pnpm 12.7.0) was reviewed, passed, and committed locally. / صيانة الأدوات روجعت ونجحت وحُفظت محليًا.
+- ENV-NODE-001 is resolved: the active runtime is Node 24.21.0 with pnpm 12.7.0. / ENV-NODE-001 محلول.
+- Batch 5 with corrections 5.1 and 5.2 (authoritative live game foundation, in memory, no transport or database) was reviewed, approved, and committed locally. / الدفعة 5 وتصحيحاتها روجعت واعتُمدت وحُفظت محليًا.
+- Batch 6 (one-sided mating capability) is authorized. Batch 7 is NOT authorized. / الدفعة 6 مأذونة، والدفعة 7 غير مأذونة.
 - v5 remains historical and unchanged. / v5 تاريخي ولا يُعدَّل.
 - All open gates remain binding. / كل البوابات المفتوحة ما زالت ملزمة.
 - Progress is recorded in `PHASE_1_IMPLEMENTATION_LOG.md`. / التقدم مسجل في سجل تنفيذ المرحلة 1.

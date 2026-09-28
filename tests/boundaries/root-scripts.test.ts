@@ -26,4 +26,24 @@ describe("TST-BOUNDARY root scripts", () => {
     });
     expect(all.get("check")).toBe(steps.join(" && "));
   });
+
+  it("TST-BOUNDARY-024 typecheck, lint, and format cover every source package", () => {
+    const typecheck = script("typecheck");
+    const biome: unknown = JSON.parse(
+      readFileSync(fileURLToPath(new URL("../../biome.json", import.meta.url)), "utf8"),
+    );
+    const text = JSON.stringify(biome);
+    for (const project of ["domain/game-values", "domain/chess-rules", "server/live-game"]) {
+      expect(typecheck, project).toContain(`tsc -p ${project}`);
+    }
+    for (const root of ["domain/**", "server/**", "tests/**", "tooling/**"]) {
+      expect(text, root).toContain(`"${root}"`);
+    }
+  });
 });
+
+function script(name: string): string {
+  const command = scripts().get(name);
+  if (typeof command !== "string") throw new Error(`missing script ${name}`);
+  return command;
+}

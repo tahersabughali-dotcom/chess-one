@@ -763,3 +763,339 @@ Owner-authorized, controlled update inside the approved Node 24 LTS and pnpm 12 
 - Perft vectors are unchanged. SAN, repetition, draw, and golden rows 018 to 023b are unchanged and passing.
 
 ENV-NODE-001 is **RESOLVED**: it was opened for Node 24.14.1, and Node 24.21.0 is now the active runtime.
+
+After review, the toolchain changes were committed locally as `9e280db` "chore: update node 24 toolchain baseline". There is no remote and nothing was pushed.
+
+## Batch 5: authoritative live game foundation (in memory)
+
+Owner-authorized. Baseline `9e280db`. Batch 5 is uncommitted, for review. Batch 6 is not authorized. This batch builds no HTTP, WebSocket, Fastify, database, outbox, reconnect, matchmaking, rating, resignation, draw offer, UI, or deployment.
+
+### Package
+
+`server/live-game` (`@chess-one/live-game`) depends only on the public entries of `@chess-one/game-values` and `@chess-one/chess-rules` (DEC-045: the rules library stays separate from the live authority, and chess logic is not duplicated). No `contracts/` package was created; command names and versions live in `commands.ts`.
+
+| File | Lines | Responsibility |
+|---|---|---|
+| `ids.ts` | 36 | Branded `GameId`, `PlayerId`, `CommandId`, `ControlLeaseId` with type guards; caller-supplied, no generation, no randomness |
+| `clock.ts` | 144 | `MonotonicMs` (DEC-061, DEC-063), audit-only `WallClockMs`, sudden-death `ClockState`, receipt timing, charge, pass, stop, add time, flag |
+| `commands.ts` | 148 | `SubmitMoveCommand.v1` and `ClaimDrawCommand.v1` input shapes, normalization, and shape validation |
+| `command-identity.ts` | 57 | Fingerprint, binding lookup and storage, stored-response replay |
+| `result.ts` | 125 | `GameResult`, `GameStatus`, position facts from chess-rules, approved precedence only |
+| `events.ts` | 58 | `game.finished.v1` domain shape |
+| `active-game.ts` | 156 | `ActiveGameState`, response and binding types, `createActiveGame` |
+| `process-command.ts` | 399 | `processCommand` and `processDeadline` |
+| `index.ts` | 59 | Public entry |
+
+### State model
+
+- `ActiveGameState` is deeply frozen:
+  - `gameId`, `rulesetId`, the seat-to-player map, and the seat-to-lease map;
+  - the canonical `Position`, the repetition history (one key per committed position), and `sequence`;
+  - `clock`, `status`, and `commandBindings`.
+- `createActiveGame` takes caller-supplied ids, leases, a sudden-death time control, and the trusted start instant. It starts at sequence 0 with a one-key history and the start position's side to move on the clock.
+  - The optional start position is a trusted server seam, never client input.
+  - Creation rejects: one player on both seats, a shared lease, a zero budget, and a start position that is already finished.
+- `status` is one of:
+  - `active`;
+  - `finished` with an immutable `GameResult`;
+  - `unresolved` with MATING_POSSIBILITY_UNRESOLVED (a flag) or TERMINAL_PRECEDENCE_UNRESOLVED (checkmate beside another fact).
+  - Only `active` accepts commands.
+
+### Decision model
+
+`processCommand(state, actor, command, ingress)` returns `{ nextState, response, events }`. It is pure and deterministic: no `Date`, `performance`, randomness, I/O, or timers. The input state is never modified.
+
+- `AuthorizedGameActor` (game, player, seat, lease) comes from the trusted caller. No command field establishes identity, seat, lease, or time.
+- `Ingress.receivedAtMonotonicMs` is the writer-domain receipt instant. `auditWallClockMs` is audit only: it appears on the event and decides nothing.
+- `processDeadline(state, observedAt)` is the writer's own timer check for a side that sends nothing.
+- Internal defects throw `Error`:
+  - out-of-order receipt;
+  - a history that does not end at the position;
+  - sequence overflow.
+  - These are programming errors, not domain codes. Because each decision is built from frozen values, a throw leaves the caller's state untouched (TST-LIVE-090 to 092).
+
+**Processing order** (CONTRACT_CATALOG_V1 2.3):
+
+1. Shape: `InvalidState`, not bound.
+2. Game, player, seat, lease, and `actor_id` echo against the trusted actor: `Unauthorized`, not bound.
+3. Identity:
+   - a stored binding with the same fingerprint returns the stored response with `replayedResponse = true`, the same state object, and no events;
+   - a different fingerprint returns `InvalidCommandIdentity`.
+4. A finished game is `GameAlreadyFinished` (bound). An unresolved game is rejected with its reason code (not bound). (Corrected in Batch 5.2, below: `GameAlreadyFinished` for a new command is not bound.)
+5. The seat must be the side to move: `NotYourTurn`, bound.
+6. `expected_game_sequence` must be current: `StaleSequence`, not bound.
+7. Deadline at `received_at`.
+8. Legality through chess-rules, then the transition.
+
+Replay precedes the finished guard, so a stored accept is still replayed after the game ends.
+
+**Sequence and identity:**
+
+- Sequence 0 is the created game. Each committed transition adds exactly one:
+  - an accepted move;
+  - a correct claim;
+  - an incorrect claim, with or without its applied move;
+  - an illegal intended move with penalty;
+  - a flag.
+- Replays and rejections never change it.
+- Binding rejections (`IllegalMove`, `NotYourTurn`, `GameAlreadyFinished`, and a well-formed `InvalidState`) add only a binding. (Corrected in Batch 5.2, below: `GameAlreadyFinished` is no longer a binding rejection.)
+- The fingerprint is canonical text: command name, `game_id`, and the normalized move or claim fields. It excludes client time, client SAN, `actor_id`, `expected_game_sequence`, session, and lease (contract 2.6). (Corrected in Batch 5.1, below: the lease is now included.)
+- Bindings are keyed by seat and client command id, and kept for the life of the state. Production retention is TBD.
+
+### Clock (DEC-042, DEC-061, DEC-063)
+
+- Integer ms balances; the running side's balance was settled at `anchorMs`. Elapsed time is `received_at - anchor`. Processing after receipt is never charged.
+- **Deadline boundary:** receipt at or before the deadline is timely (LIVE_GAME_EVENT_ORDERING_V1 section 3, which decides the exact-boundary case). The Batch 5 prompt's "zero or below is too late" wording differs; the document was followed.
+- **Rejected commands:** they change no clock field. The contract gives them "State change: No", and the server clock keeps running from the turn anchor, so the next committed transition charges the whole interval once (TST-LIVE-064). This is decided by the documents, so LIVE-CLOCK-POLICY-001 was not raised.
+- **Committed claims:** the claimant is charged to the claim's receipt, then the +120000 ms penalty goes to the opponent (ordering section 5, contract 10.1).
+- **Late commands:** the move or claim is not applied and is never checkmate. The flag is committed:
+  - the flagged balance becomes 0 and the clock stops;
+  - sequence +1;
+  - status MATING_POSSIBILITY_UNRESOLVED with the flagged side;
+  - no result and no event (DEC-064);
+  - the response code is `MoveReceivedAfterDeadline`, not bound. (Corrected in Batch 5.1, below: the late command is now bound.)
+  - Every flag is unresolved, because who can mate is a one-sided question (GAP-MATE-004) that no reviewed function answers.
+
+### Results and events
+
+- **Position facts after a committed move, in a fixed order:**
+  - checkmate or stalemate;
+  - fivefold;
+  - seventy-five-move;
+  - dead position (PROVEN_DEAD only).
+- **Precedence:** only the approved rule applies. Checkmate outranks seventy-five-move, and chess-rules already suppresses the latter. Draw facts that coexist are all kept as `drawRuleDetails`. Checkmate beside any other fact is held TERMINAL_PRECEDENCE_UNRESOLVED.
+- A correct claim finishes as `draw_rule` with `threefold_claim` or `fifty_move_claim`.
+- `GameResult` exists only for checkmate and rule draws. There is no result for time, resignation, agreement, or abandonment.
+- `game.finished.v1` is emitted only in the decision that commits `finished`, so exactly once. It carries:
+  - producer `live_game_authority`, game id, sequence, and ruleset;
+  - players, result, final FEN, and final clock;
+  - wall-clock audit time and provenance.
+  - It is not published. The durable commit, the outbox, and `event_id` are later work.
+
+### Claims (contract 10.1)
+
+| Claim | Response | Effect |
+|---|---|---|
+| Correct, current or intended | `Accepted` | Drawn at receipt. An intended move is not applied. +1 sequence. One event |
+| Incorrect current | `IncorrectClaim` | Opponent +120000 ms. The claimant keeps the move. +1 sequence |
+| Incorrect with a legal intended move | `IncorrectClaim`, server SAN | +120000 ms, then the move is applied in the same transition. +1 sequence, +1 history |
+| Illegal intended move | `IllegalMove` (`illegal_move`) | +120000 ms. The move is not applied. +1 sequence |
+| Intended move with a missing or unexpected promotion | `InvalidState` | Binding only, no penalty |
+
+Replays return the stored response; the penalty is never added twice.
+
+### Not implemented
+
+- **Resignation:** `ResignGame` is NOT_IMPLEMENTED. Every outcome would need the one-sided check (GAP-MATE-004), and the contract's "`NOT_DEAD` is a loss" wording has the same conflict as timeouts (below).
+- **Also not built:** draw offers and agreement, abort and no-start handling, reconnect and snapshot transport, Fischer, Bronstein, or multi-stage clocks, persistence, and the outbox.
+
+### Contract conflicts and gaps
+
+- **LIVE-CONTRACT-001:** the contract and ordering text say "`NOT_DEAD` → loss on time or resignation". Whole-position `NOT_DEAD` does not prove that the flagger's opponent can mate. For example, in K+Q versus K where the queen side flags, the result must be a draw under 6.9. The implementation therefore holds every flag unresolved. Because `assessMatingPossibility` never returns `NOT_DEAD`, the behaviour today is identical either way. Owner decision needed before any time or resignation result.
+- **LIVE-CONTRACT-002:** the catalog names no response code or binding status for a command received after the deadline. `MoveReceivedAfterDeadline` is used, not bound; a retry receives the unresolved or finished guard response. (Corrected in Batch 5.1, below: the late command is bound, and an exact retry replays `MoveReceivedAfterDeadline`.)
+- **LIVE-CONTRACT-003:** the catalog's `game.finished.v1` has `event_id` and `occurred_at` but no id source for a pure domain. `event_id` is left to the future outbox, and `occurred_at` comes from trusted audit wall-clock time or is null.
+- **LIVE-ORDER-001:** contract order checks turn and sequence before the deadline. A command from the side not to move, or with a stale sequence, never triggers the other side's flag; the writer's `processDeadline` timer must do that.
+
+### Boundaries
+
+- A `DOMAIN_POLICIES` entry for `server/live-game/src/` applies:
+  - allowed packages: game-values and chess-rules only;
+  - the same ambient, evaluation, and import-cycle bans;
+  - `relative_escape`, a manifest `forbidden_dependency` check, and a single public entry.
+- Relative reach into `server/*/src/` from outside is now `deep_import_bypass`.
+- `biome.json` now includes `server/**`; before this change, lint and format did not see live-game. Root `typecheck` and `check` include `tsc -p server/live-game`.
+- New tests:
+  - TST-BOUNDARY-020 to 023: live-game imports, ambient bans, reverse dependency, internals, and the manifest;
+  - TST-BOUNDARY-024: typecheck and Biome coverage of every source package.
+- Workspace: `server/*` was added to `pnpm-workspace.yaml`. The lockfile gained only two `link:` importers (`server/live-game`, `tests/live-game`). No external package was added.
+
+### Tests (tests/live-game, 56 tests)
+
+- `submit-move.test.ts`:
+  - creation;
+  - legal, illegal, promotion, and wrong-turn moves;
+  - leases, players, and games;
+  - actor echo, replay, conflict, seat scope, and fingerprint;
+  - client SAN, client time, and shapes;
+  - stale and unauthorized commands not locking an id;
+  - checkmate, stalemate, fivefold, seventy-five, and mate beside seventy-five;
+  - coexisting draws and dead positions (including the ledger 014a to 014c placements);
+  - terminal absorption and audit time.
+- `draw-claims.test.ts`: the four correct claims, all incorrect paths, penalty replay, promotion shape, turn, and claim shapes.
+- `clock.test.ts`:
+  - elapsed time;
+  - scenario A (received before the deadline, processed after it);
+  - scenario B (exact boundary is timely);
+  - scenario C (late, not applied, unresolved flag);
+  - scenario D (rejections consume no clock);
+  - late claims and UNKNOWN never producing a result;
+  - `processDeadline`;
+  - mate at the last timely instant, and mating squares arriving late;
+  - dead positions leaving no later flag.
+- `properties.property.test.ts`: random bounded sessions (60 runs, at most 40 steps, fixed seed) check that:
+  - replays and conflicts never change state;
+  - rejections never change the sequence;
+  - a commit adds exactly +1, and a move adds +1 history;
+  - terminal states are absorbing;
+  - clocks are never negative;
+  - the penalty is added exactly once;
+  - positions stay canonical;
+  - events fire once.
+  - A coverage assertion requires every response path. A second property replays every command of a session.
+- `failure-injection.test.ts`: defects leave the input unchanged.
+- `source-policy.test.ts`: no ruleset literal, no suppression comments, no assertion casts.
+
+### Ledger
+
+- `ledger-status.test.ts` now also reads `tests/live-game` titles.
+- Moved to IMPLEMENTED by live-game assertions: 001, 014a, 014b, 014c, 016b, 016c, 016e, 020c, 022a, 022b, 022c, 024, 025, 026, 027, 028.
+- 016d is PARTIAL: no flag result stands without GAP-MATE-004.
+- Still NOT_IMPLEMENTED: 015a to 015c (resignation), 016a (`NOT_DEAD` time loss), and 017a to 017c (draw offers).
+
+### Gates (Node 24.21.0, pnpm 12.7.0, TypeScript 7.0.2)
+
+- typecheck, lint, format:check, check:boundaries, test, test:rules, check, and audit all pass.
+- 30 test files: 354 passed, 0 failed, 0 skipped, 7 todo.
+  - rules: 274 passed and 7 todo. These are the 274 baseline rules tests, unchanged.
+  - boundaries: 24.
+  - live-game: 56.
+- The 293 baseline tests (274 rules + 19 boundaries) all still pass. The todo count fell from 16 to 7 because nine ledger rows are now asserted.
+- Dependencies added: 0. `package.json` changed only its two typecheck scripts. `pnpm-lock.yaml` changed only by the two workspace importers.
+
+## PHASE 1 / BATCH 5.1 — IDEMPOTENCY REVIEW CORRECTIONS
+
+Owner-authorized targeted corrections to Batch 5. Baseline `9e280db`. Batch 5 and 5.1 are uncommitted, for review. Batch 6 is not authorized. No clock, deadline, chess-rules, boundary, package, or lockfile change. Phase 0 documents are unchanged.
+
+### Defect A: the fingerprint ignored the control lease
+
+- **Old behaviour:** the fingerprint was command name, `game_id`, and the normalized move or claim fields. It left out the lease. After a lease replacement, a controller holding the new lease could send an old `client_command_id` with the same payload and receive the decision stored under the earlier lease as a replay.
+- **Fix:** `fingerprintOf` now binds the normalized authoritative `control_lease_id`:
+  - `SubmitMove`: command name and version, `game_id`, lease, and normalized from, to, and promotion;
+  - `ClaimDraw`: command name and version, `game_id`, lease, claim kind, and the normalized intended move when present.
+  - The lease is compared only after authorization has checked it against the seat's current lease.
+  - Still excluded: client SAN, client observed time, the `actor_id` echo, `expected_game_sequence`, and `client_command_id` (the lookup key together with the seat).
+- The same id under a replacement lease is now `InvalidCommandIdentity`, with no state change and no events. The same id, payload, and original lease still replays.
+- There is no production takeover API. The test seam `withRotatedLease` (in `tests/live-game/support/harness.ts`) builds the state a future lease replacement would produce.
+
+### Defect B: a late client command was not bound
+
+- **Old behaviour:** a late, valid, authorized command committed the flag but stored no binding. An exact retry fell through to the unresolved guard and received `MatingPossibilityUnresolved` instead of its original response.
+- **Fix:** the late branch now uses the existing `bound()` helper, so one pure transition:
+  1. commits the flag once, with the flagged balance at 0, the clock stopped, and the sequence +1;
+  2. sets status MATING_POSSIBILITY_UNRESOLVED;
+  3. responds `MoveReceivedAfterDeadline`;
+  4. stores the binding (seat, `client_command_id`, fingerprint, original response);
+  5. emits no event.
+- An exact replay returns the original response with `replayedResponse = true`, the same state object, and no events: no second flag, sequence, clock, or history change. The same id with a different payload is `InvalidCommandIdentity` with no change.
+- No move is applied, no claim is evaluated, and no penalty is added.
+- `processDeadline` has no client command, so it binds nothing. No placeholder binding was invented.
+- **Invariant (documented in `process-command.ts`):** every client command that reaches a committed transition is bound in the same returned state, under the one lease-scoped fingerprint. That covers an accepted move, a correct claim, an incorrect claim, and a late flag. The property test now asserts it for every committed client decision.
+- `process-command.ts` is 403 lines (399 before). `command-identity.ts` is 60 lines (57 before). No refactor and no file split.
+
+### Red tests before the fix
+
+`tests/live-game/idempotency.test.ts` was written and run before the production change: 7 tests, 6 failed, 1 passed.
+
+- TST-LIVE-100 (a rotated lease reusing an id with the same payload) failed: it received a replayed `Accepted`.
+- TST-LIVE-102, three cases (late `SubmitMove`, late current claim, late intended claim), failed: no binding was stored.
+- TST-LIVE-103 (the same id with a different payload after a late binding) failed: it received `MatingPossibilityUnresolved`.
+- TST-LIVE-104 (the late binding's fingerprint) failed: no binding existed.
+- TST-LIVE-101 (the same id, payload, and original lease still replays) passed, as expected.
+
+After the fix, all 7 pass.
+
+### Tests updated
+
+- TST-LIVE-033 now asserts that the fingerprint:
+  - ignores formatting after normalization, client SAN, client observed time, the `actor_id` echo, `expected_game_sequence`, and `client_command_id`;
+  - changes with the move, `game_id`, command kind, claim kind, intended move, or lease.
+- TST-LIVE-063 (a late command) now expects one binding, and an exact retry that replays `MoveReceivedAfterDeadline`. A claim under a new id is still `MatingPossibilityUnresolved`.
+- The replay property (TST-LIVE-081) no longer skips late commands.
+- The exact-deadline tests (receipt at the deadline is timely) are unchanged and pass.
+
+### Confirmed owner decisions (recorded, not implemented beyond Batch 5)
+
+- **A. Exact deadline:** `received_at <= deadline` is timely. `receiptTiming`, DEC-061, and DEC-063 are unchanged.
+- **B. One-sided mating question:** whole-position `NOT_DEAD` is not enough for a time or resignation result. The question is: "Can the opponent of the flagging or resigning side achieve checkmate by any legal series of moves?" (GAP-MATE-004). LIVE-CONTRACT-001 stands.
+- **C. UNKNOWN:** stays MATING_POSSIBILITY_UNRESOLVED. Every flag is unresolved, and there is no time result (DEC-064).
+- **D. Resignation:** stays NOT_IMPLEMENTED (ledger 015a to 015c).
+
+### Gates (Node 24.21.0, pnpm 12.7.0, TypeScript 7.0.2)
+
+- typecheck, lint, format:check, check:boundaries, test, test:rules, check, and audit all pass (exit 0). Audit: no known vulnerabilities.
+- 31 test files: 361 passed, 0 failed, 0 skipped, 7 todo.
+  - rules: 274 passed and 7 todo. Perft, SAN, repetition, and draw tests are unchanged.
+  - boundaries: 24.
+  - live-game: 63 (56 + 7).
+- The 293 baseline tests (274 rules + 19 boundaries) all pass. `domain/` has no diff against `9e280db`.
+- Dependencies added: 0. Batch 5.1 did not change `package.json` or `pnpm-lock.yaml`.
+- Traceability is unchanged: its Batch 5 rows remain accurate.
+
+## PHASE 1 / BATCH 5.2 — TERMINAL ABSORPTION CORRECTION
+
+Owner-authorized narrow correction. Baseline `9e280db`. Batch 5, 5.1, and 5.2 are uncommitted, for review. Batch 6 is not authorized. No fingerprint, clock, deadline, mating-policy, chess-rules, boundary, package, or lockfile change.
+
+### Previous behaviour
+
+- A new command (an id with no stored binding) against a `finished` state went through `bindRejection(..., "GameAlreadyFinished")`. That appended a `CommandBinding` and returned a new state object.
+- So a finished state was not fully absorbing. Every fresh post-game `client_command_id` grew `commandBindings` without limit, although the command decided nothing and protected no committed transition. That is unbounded memory growth an abusive client can drive, and it would become unbounded durable storage once bindings are persisted.
+
+### Corrected behaviour
+
+- The identity lookup still runs before the terminal guard, in contract 2.3 order:
+  - a binding stored before the finish replays its original response with `replayedResponse = true`, the same state object, and no events;
+  - the same id with a different fingerprint is `InvalidCommandIdentity`, with the same state object.
+- A new command against a finished state is `GameAlreadyFinished` through the non-binding `reject()`:
+  - `nextState` is the same state object;
+  - no binding, sequence, clock, position, history, or status change;
+  - no event.
+- The same new command sent again is evaluated again and answers `GameAlreadyFinished` again, with `replayedResponse = false`. There is no committed transition to protect, so no stored idempotency is needed.
+- **Terminal absorption invariant:** after `status.kind === "finished"`, every later command returns the same `ActiveGameState` object, including `commandBindings`. Existing bindings stay readable, and none are created after the finish.
+- `processDeadline` on a finished state already returned the same state (unchanged).
+- Other binding policies are unchanged:
+  - `IllegalMove`, `NotYourTurn`, the late-command flag, and correct and incorrect claims remain bound;
+  - `InvalidState` (binding only when well-formed and judged), `StaleSequence`, and `Unauthorized` are unchanged;
+  - unresolved games already answered with an unbound rejection.
+- `process-command.ts` is 405 lines (403 before): a one-line change from `bindRejection(judged, …)` to `reject(attempt, …)`, plus doc comments.
+
+### Contract deviation (owner-directed)
+
+- **LIVE-CONTRACT-004:** CONTRACT_CATALOG_V1 section 2.6 and PHASE_0_5_CONTRACT_CORRECTIONS section 3 list `GameAlreadyFinished` among the binding decisions. By owner direction in Batch 5.2, a new post-finish command is not bound.
+- Visible difference: repeating such a command answers `GameAlreadyFinished` with `replayedResponse = false` instead of `true`. A different payload under that unbound id also answers `GameAlreadyFinished` instead of `InvalidCommandIdentity`. Both are no-change rejections, and no result can be altered.
+- The Phase 0 documents are not edited here. An owner amendment of section 2.6 would align them.
+
+### Red test before the fix
+
+In `tests/live-game/idempotency.test.ts`:
+
+- **TST-LIVE-105** (a new command after checkmate) was run first and failed: the returned state was a new object with one more binding.
+- **TST-LIVE-106** (bindings made before the finish replay after it: the opening move and the mating move) passed before and after.
+- **TST-LIVE-107** (a stored id with a different payload after the finish is `InvalidCommandIdentity`) passed before and after.
+- Before the fix: 10 tests in the file, 1 failed. After the fix, all pass.
+
+### Tests updated or added
+
+- TST-LIVE-030 (post-finish commands) is superseded: new commands are now unbound, pure rejections that return the same state object, and a repeat is not a replay. The result object is unchanged.
+- TST-LIVE-071 (a dead-position finish, then a late command) now asserts the same state object.
+- The session property (TST-LIVE-080) now requires the same state object for every command against a finished state.
+- **New TST-LIVE-082:** random commands against a checkmated game always return the same state object and no event. The commands mix new moves, claims, wrong seats, stale sequences, malformed squares, replays of commands from before and after the finish, and id conflicts. Stored decisions replay unchanged, and everything else is `GameAlreadyFinished`, `InvalidCommandIdentity`, or `InvalidState`.
+
+### Gates (Node 24.21.0, pnpm 12.7.0, TypeScript 7.0.2)
+
+- typecheck, lint, format:check, check:boundaries, test, test:rules, check, and audit all pass (exit 0). Audit: no known vulnerabilities.
+- 31 test files: 365 passed, 0 failed, 0 skipped, 7 todo.
+  - rules: 274 passed and 7 todo, unchanged.
+  - boundaries: 24.
+  - live-game: 67 (63 + 4).
+- `domain/` has no diff against `9e280db`.
+- Dependencies added: 0. `package.json` and `pnpm-lock.yaml` are unchanged by Batch 5.2.
+- Traceability is unchanged: FR-GM-010 already states that a finished game is absorbing.
+
+## Batch 5 closure (review passed)
+
+Batch 5, 5.1, and 5.2 passed independent review and were approved by the owner on 2026-09-28. Closing documentation, with no code change:
+
+- **LIVE-CONTRACT-004: RESOLVED.** `CONTRACT_CATALOG_V1.md` now carries the approved rule as section 2.6.1. The 2.3 step 4, 2.5 row, and 2.6 binding list point to it, and the superseded Phase 0.5 wording is kept and marked. `PHASE_0_5_CONTRACT_CORRECTIONS.md` section 3 has a pointer to the correction. The contract deviation recorded in Batch 5.2 is closed.
+- **Exact deadline** is recorded in `PHASE_0_DECISION_CHANGELOG.md` section 13 as a clarification of DEC-061 and DEC-063: `received_at <= deadline` is timely, and `received_at > deadline` is late. The receipt is in the writer's monotonic domain, and processing after receipt is not player time.
+- **LIVE-CONTRACT-001** stays OPEN with an approved direction (changelog section 13): the timeout and resignation question is one-sided (can the opponent of the flagging or resigning player mate by any legal series?). Whole-position `NOT_DEAD` is not sufficient. `MATING_POSSIBILITY_UNRESOLVED` stays mandatory until that is proven. Batch 6 is authorized to resolve it.
+- **Known documentation inconsistency, not changed here:** `CONTRACT_CATALOG_V1.md` 2.6 and `PHASE_0_5_CONTRACT_CORRECTIONS.md` section 3 still list `control_lease_id` outside the fingerprint. The owner-approved Batch 5.1 correction binds the lease. The closure instruction limited contract edits to LIVE-CONTRACT-004, so this remains for an explicit owner amendment.

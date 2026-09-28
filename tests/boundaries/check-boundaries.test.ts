@@ -17,6 +17,10 @@ const cr = (name: string, content: string): SourceFile => ({
   path: `domain/chess-rules/src/${name}`,
   content,
 });
+const lg = (name: string, content: string): SourceFile => ({
+  path: `server/live-game/src/${name}`,
+  content,
+});
 
 describe("TST-BOUNDARY dependency boundaries", () => {
   it("TST-BOUNDARY-001 the repository has no violations", () => {
@@ -234,5 +238,103 @@ describe("TST-BOUNDARY dependency boundaries", () => {
       "const v = o.eval + o.Date + Math.abs(-1);",
     ].join("\n");
     expect(rulesFor(gv("a.ts", code))).toEqual([]);
+  });
+
+  it("TST-BOUNDARY-020 live-game may import only the public game-values and chess-rules entries", () => {
+    expect(
+      rulesFor(
+        lg("a.ts", 'import { x } from "@chess-one/game-values";'),
+        lg("b.ts", 'import { y } from "@chess-one/chess-rules";\nimport { a } from "./a.ts";'),
+      ),
+    ).toEqual([]);
+    for (const code of [
+      'import pg from "pg";',
+      'import { Kysely } from "kysely";',
+      'import Fastify from "fastify";',
+      'import { WebSocket } from "ws";',
+      'import Redis from "ioredis";',
+      'import { readFileSync } from "node:fs";',
+      'import { ai } from "@chess-one/ai";',
+      'import { wallet } from "@chess-one/economy";',
+      'import { review } from "@chess-one/analysis";',
+      'import { notify } from "@chess-one/notifications";',
+      'import { App } from "@chess-one/web-client";',
+    ]) {
+      expect(rulesFor(lg("a.ts", code)), code).toContain("forbidden_import");
+    }
+    expect(
+      rulesFor(lg("a.ts", 'import { p } from "@chess-one/chess-rules/src/fen.ts";')),
+    ).toContain("deep_import_bypass");
+    expect(
+      rulesFor(lg("a.ts", 'import { p } from "../../../domain/chess-rules/src/fen.ts";')),
+    ).toContain("relative_escape");
+    expect(
+      rulesFor(lg("a.ts", 'import { h } from "../../../tests/rules/support/positions.ts";')),
+    ).toContain("test_dependency_in_production");
+  });
+
+  it("TST-BOUNDARY-021 live-game code has no ambient clock, randomness, I/O, or evaluation", () => {
+    for (const code of [
+      "const t = Date.now();",
+      "const p = performance.now();",
+      "const r = Math.random();",
+      "const id = crypto.randomUUID();",
+      "const e = process.env.X;",
+      "setTimeout(() => {}, 1);",
+    ]) {
+      expect(rulesFor(lg("a.ts", code)), code).toContain("ambient_access");
+    }
+    expect(rulesFor(lg("a.ts", 'const f = new Function("return 1");'))).toContain("dynamic_code");
+    expect(
+      rulesFor(
+        lg("a.ts", 'import { b } from "./b.ts";'),
+        lg("b.ts", 'import { a } from "./a.ts";'),
+      ),
+    ).toContain("import_cycle");
+  });
+
+  it("TST-BOUNDARY-022 rules never depend on live-game, and nothing reaches its internals", () => {
+    expect(
+      rulesFor(cr("a.ts", 'import { processCommand } from "@chess-one/live-game";')),
+    ).toContain("forbidden_import");
+    expect(
+      rulesFor(gv("a.ts", 'import { processCommand } from "@chess-one/live-game";')),
+    ).toContain("forbidden_import");
+    const testFile: SourceFile = {
+      path: "tests/live-game/x.test.ts",
+      content: 'import { startClock } from "../../server/live-game/src/clock.ts";',
+    };
+    expect(rulesFor(testFile)).toContain("deep_import_bypass");
+    expect(
+      rulesFor({
+        path: "tests/live-game/y.test.ts",
+        content: 'import { c } from "@chess-one/live-game/src/clock.ts";',
+      }),
+    ).toContain("deep_import_bypass");
+  });
+
+  it("TST-BOUNDARY-023 the live-game manifest allows only game-values and chess-rules", () => {
+    const manifest = (
+      dependencies: Record<string, string>,
+      exports: Record<string, string> = { ".": "./src/index.ts" },
+    ): SourceFile => ({
+      path: "server/live-game/package.json",
+      content: JSON.stringify({ exports, dependencies }),
+    });
+    expect(
+      rulesFor(
+        manifest({
+          "@chess-one/chess-rules": "workspace:*",
+          "@chess-one/game-values": "workspace:*",
+        }),
+      ),
+    ).toEqual([]);
+    for (const name of ["redis", "pg", "fastify", "ws", "kysely", "uuid"]) {
+      expect(rulesFor(manifest({ [name]: "1.0.0" })), name).toContain("forbidden_dependency");
+    }
+    expect(rulesFor(manifest({ vitest: "5.0.2" }))).toContain("test_dependency_in_production");
+    expect(
+      rulesFor(manifest({}, { ".": "./src/index.ts", "./clock": "./src/clock.ts" })),
+    ).toContain("public_entry");
   });
 });

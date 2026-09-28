@@ -31,6 +31,11 @@ const DOMAIN_POLICIES: readonly DomainPolicy[] = [
     allowedPackages: ["@chess-one/game-values"],
     allowedDependencies: ["@chess-one/game-values"],
   },
+  {
+    srcRoot: "server/live-game/src/",
+    allowedPackages: ["@chess-one/game-values", "@chess-one/chess-rules"],
+    allowedDependencies: ["@chess-one/game-values", "@chess-one/chess-rules"],
+  },
 ];
 
 const PRODUCTION_ROOTS = ["domain/", "contracts/", "server/", "clients/"];
@@ -174,7 +179,7 @@ function checkImports(file: SourceFile, scan: SourceFacts, violations: Violation
       const ownSrc = policy?.srcRoot;
       if (ownSrc !== undefined && !target.startsWith(ownSrc)) {
         add("relative_escape", line, `${specifier} leaves ${ownSrc}`);
-      } else if (ownSrc === undefined && /^domain\/[^/]+\/src\//.test(target)) {
+      } else if (ownSrc === undefined && /^(?:domain|server)\/[^/]+\/src\//.test(target)) {
         add(
           "deep_import_bypass",
           line,

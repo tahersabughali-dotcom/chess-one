@@ -7,6 +7,7 @@
     "ignoreUnknown": true,
     "includes": [
       "domain/**",
+      "server/**",
       "tests/**",
       "tooling/**",
       "*.json",

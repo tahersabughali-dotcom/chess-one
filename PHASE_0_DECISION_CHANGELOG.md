@@ -159,3 +159,13 @@ Other preflight corrections, with no new decision:
 - `CHESS_RULES_GOLDEN_TEST_LEDGER_V1.md`: 008a had no black king. It is replaced by `1k3r2/8/8/8/8/8/8/R3K2R w KQ - 0 1`. Positive `threefold_intended` (018b) and `fifty_move_intended` (020b) rows were added, with an incorrect fifty-move intended claim (020c). Rows 015b, 015c, 016a, and 016e follow DEC-064.
 - `CHESS_RULES_GOLDEN_TEST_LEDGER_V1.md`: 014d had the d2 knight checking the black king with White to move. It is replaced by `8/8/8/8/4k3/8/2N1N3/4K3 w - - 0 1`. Rows 015a and 016b used a position already finished under 5.2.2 and now expect no resignation or flag effect.
 - The dead-position problem is not solved. GAP-MATE-001 now names the missing adjudication policy. GAP-MATE-004 records that 5.1.2 and 6.9 need a one-sided mating check that does not exist yet.
+
+## 13. Phase 1 Batch 5 review closure / إغلاق مراجعة الدفعة 5
+
+Owner-approved outcomes of the independent review of Phase 1 Batch 5, 5.1, and 5.2 (2026-09-28). These are later approved corrections. Earlier wording stays in place, marked superseded where it changed. ملف v5 بقي دون تعديل.
+
+| ID | Status | Record |
+|---|---|---|
+| LIVE-CONTRACT-004 | RESOLVED | A new, previously unbound command against a finished game is a non-binding `GameAlreadyFinished`. It changes no state, emits no event, and stores no binding. A bound id is checked before the terminal guard: the same fingerprint replays, and a different fingerprint is `InvalidCommandIdentity`. Reason: a finished game is absorbing, and post-terminal bindings protect nothing while allowing unbounded growth. Normative text: `CONTRACT_CATALOG_V1.md` 2.6.1, with a pointer in `PHASE_0_5_CONTRACT_CORRECTIONS.md` section 3 |
+| Exact deadline (clarifies DEC-061, DEC-063; no new decision) | A | `received_at <= deadline` is TIMELY. `received_at > deadline` is LATE. `received_at` is stamped in the Authoritative Live Game Writer's monotonic clock domain. Processing after receipt consumes no player time. This records the reviewed Batch 5 behaviour (`LIVE_GAME_EVENT_ORDERING_V1.md` section 3); the implementation did not change |
+| LIVE-CONTRACT-001 | OPEN (direction approved) | Whole-position `NOT_DEAD` is not sufficient to decide a timeout or resignation loss. The rule question is one-sided: can the opponent of the flagging or resigning player achieve checkmate by any legal series of moves from the current position? Until that capability is proven for a position, `MATING_POSSIBILITY_UNRESOLVED` remains mandatory (DEC-064). The contract, ordering, authority-pack, and test-architecture text that maps `NOT_DEAD` to a loss is misleading on this point and is to be corrected when the one-sided capability exists |

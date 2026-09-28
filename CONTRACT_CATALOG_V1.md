@@ -62,7 +62,8 @@
 1. التحقق من شكل المربعات ومن الترقية. الشكل غير الصالح: `InvalidState` بلا تنفيذ.
 2. التحقق من الجلسة والعقد والمقعد و`actor_id` كما في 2.1.
 3. سلوك `client_command_id` كما في 2.5. قرار مُلزِم سابق يُعاد ولا يُعاد تنفيذه.
-4. إذا كانت المباراة منتهية وهذا المعرّف ليس قرار القبول المخزّن: `GameAlreadyFinished`.
+4. إذا كانت المباراة منتهية وهذا المعرّف ليس قرار القبول المخزّن: `GameAlreadyFinished`.  
+   **Later approved correction (LIVE-CONTRACT-004, RESOLVED, see 2.6.1):** for a new command with no stored binding, `GameAlreadyFinished` is a non-binding rejection. A bound command id is still decided at step 3, before this guard. / تصحيح معتمد لاحق: الرفض هنا لا يُلزم المعرّف.
 5. إذا لم يكن المقعد هو صاحب النوبة: `NotYourTurn`.
 6. إذا خالف `expected_game_sequence` تسلسل الخادم: `StaleSequence` بلا كتابة.
 7. الموعد النهائي يُقارن بزمن الاستلام الرتيب (monotonic receipt) كما في `LIVE_GAME_EVENT_ORDERING_V1.md`. `received_at` هو هذا الزمن، مختومًا داخل مجال الساعة الرتيبة لكاتب المباراة الحية (DEC-063). `applied_at` زمن الالتزام بعد الفحص، ولا يُستخدم لخصم وقت المعالجة من اللاعب. أمر وصل قبل الموعد يبقى في الوقت حتى لو اكتمل الفحص بعده. أمر وصل بعد الموعد لا يُطبَّق. تعويض التأخير الشبكي (Lag compensation) غير معتمد.
@@ -84,7 +85,7 @@
 | NotYourTurn | Resolved seat is not the side to move, or that rejection is being replayed | No |
 | StaleSequence | `expected_game_sequence` does not match the server | No. This response does not lock `client_command_id` |
 | Unauthorized | Missing/invalid session or lease, superseded lease, or `actor_id` mismatch | No. This response does not lock `client_command_id` |
-| GameAlreadyFinished | Result already committed and this command is not the stored accept | No |
+| GameAlreadyFinished | Result already committed and this command is not the stored accept | No. This response does not lock `client_command_id` and stores no binding (LIVE-CONTRACT-004, 2.6.1) |
 | InvalidState | Unusable shape, including a promotion field that the position does not require, or a missing promotion on a promotion move | No, until a binding decision is stored for a well-formed command |
 | InvalidCommandIdentity | Same `client_command_id` already has a binding decision, and the semantic payload differs | No execution |
 
@@ -95,15 +96,32 @@
 البصمة الدلالية للأمر هي: `game_id` + `from_square` + `to_square` + `promotion_piece` بعد تطبيع الحالة والفراغ.  
 خارج البصمة: `client_observed_at` و`client_san` و`actor_id` و`expected_game_sequence` و`session_id` و`control_lease_id`.
 
-قرار مُلزِم هو: `Accepted` أو `IllegalMove` أو `NotYourTurn` أو `GameAlreadyFinished` أو `InvalidState` على أمر مكتمل الشكل وصل إلى حكم.  
-`StaleSequence` و`Unauthorized` لا يقفلان المعرّف، لأنهما لا يحسمان النقلة ولا يكتبان حالة.
+قرار مُلزِم هو: `Accepted` أو `IllegalMove` أو `NotYourTurn` أو `InvalidState` على أمر مكتمل الشكل وصل إلى حكم.  
+`StaleSequence` و`Unauthorized` لا يقفلان المعرّف، لأنهما لا يحسمان النقلة ولا يكتبان حالة. `GameAlreadyFinished` لا يقفل المعرّف (LIVE-CONTRACT-004، القسم 2.6.1).  
+*Superseded wording (Phase 0.5):* this list originally also named `GameAlreadyFinished` as a binding decision. That entry is withdrawn by LIVE-CONTRACT-004.
 
 - بعد قرار مُلزِم، نفس المعرّف مع نفس البصمة: أعد القرار الأصلي مع `replayed_response = true`. لا نقلة ثانية. `Accepted` يبقى `Accepted` حتى لو تغيّر التسلسل الذي يرسله العميل في إعادة المحاولة، وحتى لو انتهت المباراة بعد تلك النقلة.
 - بعد قرار مُلزِم، نفس المعرّف مع بصمة مختلفة: `InvalidCommandIdentity` ولا تنفيذ.
 - معرّف لم يُقفل بعد، وتسلسل قديم: `StaleSequence` بلا كتابة. إعادة نفس المعرّف بعد المزامنة ما زالت ممكنة.
 - طلبان متطابقان يصلان معًا: الكاتب الواحد يسلسلهما. الأول يُنتج القرار المُلزِم، والثاني يستلمه كإعادة.
 - المعرّف خاص بالمباراة وبالمقعد الذي قُفل عليه. مستدعٍ ليس ذلك المقعد لا يستلم جسم القرار الأصلي؛ الرد `Unauthorized`.
-- أمر لم يُقبل من قبل، والمباراة منتهية: `GameAlreadyFinished`.
+- أمر لم يُقبل من قبل، والمباراة منتهية: `GameAlreadyFinished`، رفض غير مُلزِم (LIVE-CONTRACT-004).
+
+### 2.6.1 Later approved correction — LIVE-CONTRACT-004 (RESOLVED) / تصحيح معتمد لاحق
+
+Approved by the owner after the Phase 1 Batch 5.2 review (2026-09-28). This corrects 2.3 step 4, the 2.5 row, and the 2.6 binding list above. The earlier wording is kept above as superseded, not erased.
+
+For a game whose status is already finished:
+
+| Command | Result |
+|---|---|
+| New, previously unbound `client_command_id` | `GameAlreadyFinished`, a non-binding rejection. The authoritative state is returned unchanged (the same state object in the implementation): no sequence, clock, position, history, or status change, no event, and no new command binding. The same command sent again is evaluated again and answers `GameAlreadyFinished` again, with `replayed_response = false` |
+| Already bound id, same fingerprint | The original stored response, with `replayed_response = true`. The identity check (step 3) still runs before the terminal guard (step 4) |
+| Already bound id, different fingerprint | `InvalidCommandIdentity`, no execution |
+
+Reason: a finished game is an absorbing state. A post-terminal binding protects no authoritative transition, and storing one for every new id would let a client grow the binding store without limit after the game ends.
+
+المباراة المنتهية حالة ماصّة. الأمر الجديد بعد النهاية يُرفض بـ `GameAlreadyFinished` دون تخزين قرار مُلزِم ودون أي تغيير في الحالة. الأمر المُلزِم سابقًا يُعاد قراره الأصلي، والبصمة المختلفة `InvalidCommandIdentity`.
 
 ### 2.7 Critical-path ban / ممنوعات المسار الحرج
 
