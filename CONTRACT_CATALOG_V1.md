@@ -213,6 +213,8 @@ Reason: without the lease, a controller holding a replacement lease could send a
 
 لا يُنشر هذا الحدث من حالة `MATING_POSSIBILITY_UNRESOLVED` (DEC-064).
 
+*Later status (Phase 1 Batch 8, LIVE-CONTRACT-003 RESOLVED, pending review):* `event_id` is assigned at the persistence boundary when the event is written to the outbox in the same transaction as the final state, and is stored once, so it is stable for replay. `occurred_at` is the outbox row's commit-transaction time. The table above is unchanged. See `PHASE_0_DECISION_CHANGELOG.md` section 17. Batch 8.1 verified this on a local PostgreSQL 18.6 test database (changelog section 18). / حالة لاحقة: يُسند `event_id` عند حدود الحفظ داخل معاملة الحالة النهائية نفسها.
+
 المستهلكون المتوقعون، وكلهم خارج المعاملة الحرجة: Rating, Analysis, Rewards, Statistics, Notifications, Career projection, Mind evidence, Chess Land, Tournament standings.  
 كل مستهلك يتجاهل `event_id` الذي طبّقه. فشل أحدهم لا يستدعي تعويضًا من نواة المباراة.
 

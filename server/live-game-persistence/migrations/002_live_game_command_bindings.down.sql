@@ -1,0 +1,1 @@
+DROP TABLE live_game_command_bindings;

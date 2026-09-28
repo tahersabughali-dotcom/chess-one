@@ -33,12 +33,30 @@ describe("TST-BOUNDARY root scripts", () => {
       readFileSync(fileURLToPath(new URL("../../biome.json", import.meta.url)), "utf8"),
     );
     const text = JSON.stringify(biome);
-    for (const project of ["domain/game-values", "domain/chess-rules", "server/live-game"]) {
+    for (const project of [
+      "domain/game-values",
+      "domain/chess-rules",
+      "server/live-game",
+      "server/live-game-persistence",
+    ]) {
       expect(typecheck, project).toContain(`tsc -p ${project}`);
     }
     for (const root of ["domain/**", "server/**", "tests/**", "tooling/**"]) {
       expect(text, root).toContain(`"${root}"`);
     }
+  });
+});
+
+describe("TST-BOUNDARY database integration wiring", () => {
+  it("TST-BOUNDARY-028 PostgreSQL tests run only through test:db and cannot skip", () => {
+    expect(script("test:db")).toBe("vitest run --config vitest.db.config.ts");
+    expect(script("check")).not.toContain("test:db");
+    const suite = readFileSync(
+      fileURLToPath(new URL("../live-game-persistence/postgres.db.test.ts", import.meta.url)),
+      "utf8",
+    );
+    expect(suite).not.toMatch(/\.(skip|todo|only)\b|skipIf|runIf/);
+    expect(suite).toContain("BLOCKED by environment");
   });
 });
 

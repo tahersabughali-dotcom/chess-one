@@ -24,9 +24,10 @@ export type FinishProvenance = CommandFinishProvenance | DeadlineFinishProvenanc
 /**
  * Domain shape of `game.finished.v1` (CONTRACT_CATALOG_V1 section 5), produced
  * only in the decision that commits a final result, so at most once per game.
- * It is not published here: the durable commit, outbox, and `event_id`
- * assignment are later work. `occurredAtWallClockMs` is trusted audit time
- * and never affects the result.
+ * It is not published here: the writer stores it in the outbox in the same
+ * transaction as the state, and the persistence adapter assigns its durable
+ * `event_id` (LIVE-CONTRACT-003). `occurredAtWallClockMs` is trusted audit
+ * time and never affects the result.
  */
 export interface GameFinishedV1 {
   readonly eventName: "game.finished";

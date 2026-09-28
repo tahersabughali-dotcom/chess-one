@@ -24,6 +24,11 @@ interface DomainPolicy {
   readonly allowedDependencies: readonly string[];
 }
 
+/**
+ * Source roots with a closed import set and the ambient-access ban. The
+ * persistence adapter is included: it gets its pool and file paths from the
+ * host, so it needs no environment, clock, or global I/O either.
+ */
 const DOMAIN_POLICIES: readonly DomainPolicy[] = [
   { srcRoot: "domain/game-values/src/", allowedPackages: [], allowedDependencies: [] },
   {
@@ -36,7 +41,30 @@ const DOMAIN_POLICIES: readonly DomainPolicy[] = [
     allowedPackages: ["@chess-one/game-values", "@chess-one/chess-rules"],
     allowedDependencies: ["@chess-one/game-values", "@chess-one/chess-rules"],
   },
+  {
+    srcRoot: "server/live-game-persistence/src/",
+    allowedPackages: [
+      "@chess-one/game-values",
+      "@chess-one/chess-rules",
+      "@chess-one/live-game",
+      "kysely",
+      "kysely/migration",
+      "pg",
+      "node:fs/promises",
+      "node:path",
+    ],
+    allowedDependencies: [
+      "@chess-one/game-values",
+      "@chess-one/chess-rules",
+      "@chess-one/live-game",
+      "kysely",
+      "pg",
+    ],
+  },
 ];
+
+/** Database access stays on the server: clients never reach the store or its drivers. */
+const CLIENT_FORBIDDEN_PACKAGES = ["kysely", "pg", "pg-", "@chess-one/live-game-persistence"];
 
 const PRODUCTION_ROOTS = ["domain/", "contracts/", "server/", "clients/"];
 
@@ -208,6 +236,9 @@ function checkImports(file: SourceFile, scan: SourceFacts, violations: Violation
     if (isContract && /^@chess-one\/(?:server|client|web)/.test(root)) {
       add("contract_imports_runtime", line, `${specifier} imports server or client code`);
     }
+    if (file.path.startsWith("clients/") && matchesPackageList(root, CLIENT_FORBIDDEN_PACKAGES)) {
+      add("client_imports_persistence", line, `${specifier} is server-side persistence`);
+    }
     if (policy !== undefined && !policy.allowedPackages.includes(specifier)) {
       add(
         "forbidden_import",
@@ -268,6 +299,9 @@ function checkManifest(file: SourceFile, violations: Violation[]): void {
     }
     if (matchesPackageList(name, LICENSE_GATED_PACKAGES)) {
       add("license_gated_package", `${name} needs the license gate first`);
+    }
+    if (file.path.startsWith("clients/") && matchesPackageList(name, CLIENT_FORBIDDEN_PACKAGES)) {
+      add("client_imports_persistence", `${name} is server-side persistence`);
     }
   }
 

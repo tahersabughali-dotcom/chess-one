@@ -1,0 +1,14 @@
+{
+  "name": "@chess-one/tests-live-game-persistence",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "@chess-one/chess-rules": "workspace:*",
+    "@chess-one/game-values": "workspace:*",
+    "@chess-one/live-game": "workspace:*",
+    "@chess-one/live-game-persistence": "workspace:*",
+    "kysely": "0.29.6",
+    "pg": "8.23.0"
+  }
+}

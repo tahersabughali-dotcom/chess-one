@@ -893,7 +893,7 @@ Replays return the stored response; the penalty is never added twice.
 
 - **LIVE-CONTRACT-001:** the contract and ordering text say "`NOT_DEAD` → loss on time or resignation". Whole-position `NOT_DEAD` does not prove that the flagger's opponent can mate. For example, in K+Q versus K where the queen side flags, the result must be a draw under 6.9. The implementation therefore holds every flag unresolved. Because `assessMatingPossibility` never returns `NOT_DEAD`, the behaviour today is identical either way. Owner decision needed before any time or resignation result.
 - **LIVE-CONTRACT-002:** the catalog names no response code or binding status for a command received after the deadline. `MoveReceivedAfterDeadline` is used, not bound; a retry receives the unresolved or finished guard response. (Corrected in Batch 5.1, below: the late command is bound, and an exact retry replays `MoveReceivedAfterDeadline`.)
-- **LIVE-CONTRACT-003:** the catalog's `game.finished.v1` has `event_id` and `occurred_at` but no id source for a pure domain. `event_id` is left to the future outbox, and `occurred_at` comes from trusted audit wall-clock time or is null.
+- **LIVE-CONTRACT-003:** the catalog's `game.finished.v1` has `event_id` and `occurred_at` but no id source for a pure domain. `event_id` is left to the future outbox, and `occurred_at` comes from trusted audit wall-clock time or is null. (*Resolved in Batch 8: `PHASE_0_DECISION_CHANGELOG.md` section 17.*)
 - **LIVE-ORDER-001:** contract order checks turn and sequence before the deadline. A command from the side not to move, or with a stale sequence, never triggers the other side's flag; the writer's `processDeadline` timer must do that.
 
 ### Boundaries
@@ -1418,7 +1418,7 @@ No ledger row is NOT_IMPLEMENTED any more, so the todo count is 0. `ledger-statu
 
 - GAP-MATE-004b (general one-sided algorithm) and GAP-MATE-001 (product policy for `UNKNOWN`) stay open.
 - LIVE-OFFER-001 to 006 await owner review. LIVE-OFFER-006 needs a product decision on repeated offers. (*All resolved at the Batch 7 closure below.*)
-- Abort, abandonment, reconnect, lease replacement, persistence, the outbox, and transport are not built.
+- Abort, abandonment, reconnect, lease replacement, persistence, the outbox, and transport are not built. (*Persistence and the outbox: Batch 8 below.*)
 
 ## PHASE 1 / BATCH 7 CLOSURE — LIVE-OFFER-006 RESOLVED
 
@@ -1440,3 +1440,275 @@ Batch 7 passed review. The owner approved the repeated-offer policy: **one draw 
   - the v6 status.
   Traceability is unchanged: the policy is not material to any row's status.
 - **Gates:** see the Batch 7 commit record in the Batch 8 section.
+
+## PHASE 1 / BATCH 8 — PERSISTENCE FOUNDATION (POSTGRESQL + KYSELY + TRANSACTIONS + OUTBOX)
+
+Owner-authorized (2026-09-28). Implemented, **uncommitted**, awaiting review. No remote, no push, no review ZIP.
+
+### Batch 7 commit record
+
+- Commit `bee3f128d9b4239f7bcb4a753e272b502f61be8d` ("feat: complete live game draw offers"), 18 files, local only.
+- Gates before the commit: typecheck, lint, format:check, check:boundaries, test, test:rules, check, and audit all passed (exit 0). 38 test files, 432 passed, 0 failed, 0 skipped, 0 todo (rules 291, boundaries 24, live-game 117). Working tree clean afterwards.
+
+### Environment
+
+- Checked on this machine: no `psql`, `postgres`, `pg_ctl`, `initdb`, `docker`, or `podman`; WSL not installed; nothing listening on port 5432.
+- Nothing was installed (no system software, no Docker), and no shared, cloud, or Supabase database was used.
+- **The PostgreSQL integration tests are therefore BLOCKED by the environment.** `pnpm test:db` runs them and fails all 9 with a BLOCKED message; they never skip.
+- *Later status (Batch 8.1):* a local PostgreSQL 18.6 test server was installed with owner authorization, and the suite passes; see the Batch 8.1 section.
+
+### Dependencies (exact versions, reviewed before install)
+
+- `kysely` 0.29.6 (MIT, stable, no dependencies) and `pg` 8.23.0 (MIT), production dependencies of `@chess-one/live-game-persistence`; `@types/pg` 8.23.1 (MIT) as a dev dependency. The test package adds `kysely` and `pg` as dev dependencies.
+- Transitive, all from `pg`: `pg-pool` 3.14.0, `pg-protocol` 1.16.0, `pg-types` 2.2.0, `pg-connection-string` 2.14.0, `pg-cloudflare` 1.4.0 (optional), `pgpass` 1.0.5, `split2` 4.2.0 (ISC), `pg-int8` 1.0.1 (ISC), `postgres-array` 2.0.0, `postgres-bytea` 1.0.1, `postgres-date` 1.0.7, `postgres-interval` 1.2.0, `xtend` 4.0.2. All others MIT.
+- 16 new lockfile packages, each with a `sha512` integrity hash. None has an install script. `pnpm audit`: no known vulnerabilities.
+- No ORM other than Kysely, no beta or release-candidate version, no broker, no telemetry or logging library.
+
+### Architecture
+
+- **Live Game owns the contracts** (`server/live-game/src/persistence/`, pure, same boundary policy as the core: no Kysely, pg, I/O, clock, or environment):
+  - `state-codec.ts`: the `live_game_state.v1` format and `decodeGameState`;
+  - `response-codec.ts`: stored responses, and the plain `game.finished.v1` payload;
+  - `value-codec.ts`: clock, result, and status;
+  - `records.ts`: strict readers;
+  - `repository.ts`: the `LiveGameRepository` port, its error kinds, `ClockDomainId`, `EventId`, and `planCommit`;
+  - `writer.ts`: `startGame`, `executeCommand`, and `executeDeadline`.
+- **`processCommand` is unchanged and database-free.** The writer loads, decides with the pure core, plans, and commits.
+- **Adapter** (`server/live-game-persistence`): `PostgresLiveGameRepository`, `createLiveGameDatabase` (a pg pool from host-supplied settings; it never reads the environment), and `SqlFileMigrationProvider` with numbered SQL files.
+- chess-rules and game-values are untouched: no database types in the domain.
+
+### Serialization: `live_game_state.v1`
+
+- One explicit, versioned format. Encoding copies each field into plain data; no domain object is stored as is.
+- **Position:** canonical FEN (`formatFen`). On load it must parse and format back to the same text.
+- **Repetition history:** the canonical repetition-key text of every committed position, never derived from a FEN. On load each key is rebuilt into a position, which must parse, and `repetitionKey` of that position must give the same text; the key object comes from `repetitionKey`, its only constructor. Consecutive keys must alternate sides, and the last key must equal the current position's key.
+- **Fail closed:** decoding rebuilds values through validated constructors and checks the invariants the core relies on, for example:
+  - an active game has a running clock owned by the side to move, and no terminal facts;
+  - a stopped game has a stopped clock;
+  - a checkmate result is mate on the board;
+  - a pending offer is on an active game, addressed to the side to move, on the current committed move;
+  - bindings are contiguous and unique, and belong to this game.
+  Any failure is `corrupt_state` with a field path. Nothing is repaired or defaulted, and reasons never repeat stored values (control-lease ids).
+- `pendingDrawOffer` and `lastDrawOfferMove` are persisted.
+
+### Schema (migrations 001 to 003)
+
+- `live_games`:
+  - primary key `game_id`;
+  - typed columns `state_format`, `ruleset_id`, player ids, `sequence`, `status_kind`, `position_fen`, and `clock_domain_id`;
+  - the `state` JSONB record;
+  - audit `created_at` and `updated_at`;
+  - checks tying the JSONB record to the columns, and allowing an offer only on an active game.
+- `live_game_command_bindings`:
+  - primary key `(game_id, seat, client_command_id)` and `UNIQUE (game_id, binding_ordinal)`;
+  - fingerprint, `bound_at_sequence`, and the original response as JSONB;
+  - foreign key to the game, `ON DELETE RESTRICT`.
+- `outbox_events`:
+  - primary key `event_id uuid DEFAULT gen_random_uuid()`;
+  - type and version, aggregate type, id, and sequence, and the JSONB payload;
+  - `created_at`, `publication_status` (`pending` or `published`), and `published_at`, with a consistency check;
+  - `UNIQUE (aggregate_type, aggregate_id, aggregate_sequence, event_type)`;
+  - partial index `outbox_events_pending_idx` on `(created_at, event_id)` for pending rows.
+- JSONB only for the aggregate record, the stored response, and the event payload. Every down migration drops its own table. Kysely's migration bookkeeping lives in `live_game_schema_migrations` and `live_game_schema_migration_lock`.
+- On load, the adapter checks the typed columns against the decoded record; a mismatch is corruption.
+
+### Transactions and concurrency
+
+- **Load:** one `REPEATABLE READ, READ ONLY` transaction reads the game row and its bindings in ordinal order.
+- **Commit:** one transaction:
+  - `UPDATE live_games ... WHERE game_id = $1 AND sequence = $expected`, where any row count other than 1 is `concurrency_conflict`;
+  - then the binding insert;
+  - then the outbox inserts, `RETURNING event_id`.
+  A bind-only rejection still runs the compare-and-set update (audit time only), so it holds the row lock and proves its sequence.
+- Any error rolls everything back. SQLSTATE `23505`, `40001`, and `40P01` are `concurrency_conflict`; others are `persistence_failure` with the SQLSTATE only, never a message.
+- Nothing is published inside the transaction. The writer does not retry a conflict: the caller reloads and resubmits, and the stored binding replays any decision that won.
+- Every statement is built by Kysely with bound parameters; the only raw SQL is the fixed migration text.
+
+### `planCommit`
+
+- It maps a decision to no write, `bind_only`, or `transition`.
+- The core appends at most one binding and moves the sequence by at most one. Any other change is a defect and is thrown, never persisted:
+  - stored bindings changed;
+  - two bindings appended;
+  - a sequence jump;
+  - a field change without a sequence step, compared over every own field;
+  - a game identity change;
+  - events without a transition.
+
+### Clock recovery: LIVE-RECOVERY-CLOCK-001 (OPEN)
+
+- The existing architecture does not decide how much time a running clock used between a writer's last commit and a restart. Monotonic instants never cross processes (DEC-063).
+- Each commit therefore stores the writer's `clock_domain_id`. A writer in another domain does not resume a running clock:
+  - it replays stored bindings unchanged, because identity is decided before any clock field is read;
+  - it refuses every other command and deadline check with `clock_recovery_blocked`, writing nothing.
+- Finished and unresolved games never read the clock again and are served normally. Owner decision needed (changelog section 17).
+- *Later status (Batch 8.1):* RESOLVED by the owner: the game is recovery-paused at its committed balances. `clock_recovery_blocked` is replaced by `recovery_paused`; see the Batch 8.1 section.
+
+### LIVE-CONTRACT-003 (RESOLVED)
+
+- `event_id` is assigned at the persistence boundary by PostgreSQL, stored once, and returned to the writer.
+- `occurred_at` for the future envelope is the outbox `created_at`, the database time of the commit transaction.
+- Details are in changelog section 17.
+
+### Boundaries
+
+- A new policy for `server/live-game-persistence/src/`. It may import only game-values, chess-rules, live-game, `kysely`, `kysely/migration`, `pg`, `node:fs/promises`, and `node:path`, and it keeps the ambient ban (no environment, clock, console, or timers). Its manifest may list only those packages.
+- The live-game core, chess-rules, and game-values still cannot import Kysely, pg, or the adapter.
+- A new rule, `client_imports_persistence`: `clients/` may not import or depend on `kysely`, `pg`, `pg-*`, or the adapter.
+- Root `typecheck` and `check` include `tsc -p server/live-game-persistence`.
+- `test:db` runs the integration suite through `vitest.db.config.ts`; the default `test` excludes `*.db.test.ts`.
+
+### Tests
+
+- `tests/live-game-persistence`, 5 files, 47 tests.
+- The repository double and the recording driver are labelled as not PostgreSQL, and no PostgreSQL behaviour is claimed from them.
+- **Codec (TST-PERSIST-001 to 006, 010 to 021):**
+  - round trips for a new game, active with bindings, pending offer, declined offer (marker), checkmate, draw agreed, and unresolved flag;
+  - decoded states decide the next commands like the originals;
+  - bindings replay after decode;
+  - `UNKNOWN` never gains a result;
+  - corruption: format and version, missing and extra fields, invalid and non-canonical FEN, mismatched and non-canonical repetition keys, negative or fractional clock values, invalid sequences, malformed results, invalid leases and ids, impossible enums and status combinations, impossible offer state, malformed bindings and responses, binding order and duplicates;
+  - a property test, 400 runs, seed 20260928: a mutated record either decodes to exactly the same record or is refused.
+- **Planning (TST-PERSIST-040 to 044).**
+- **Writer, with a contract double that stores only JSON text (TST-PERSIST-050 to 058):**
+  - start and duplicate start;
+  - the stored state equals the pure core's;
+  - no write for non-binding rejections, and a bind-only write for bound ones;
+  - replay after restart, with LIVE-RECOVERY-CLOCK-001 blocking new decisions;
+  - one outbox event across a finish and a restart;
+  - a concurrency conflict;
+  - the writer's flag with its event;
+  - corrupt and missing games.
+- **Adapter protocol, with a recording Kysely driver (TST-PERSIST-060 to 069):**
+  - the exact SQL and bound parameters, with no literal data in SQL text;
+  - transaction settings, and the column cross-checks;
+  - rollback at the state update, binding insert, and outbox insert;
+  - compare-and-set misses;
+  - SQLSTATE mapping without message leaks.
+- **Migrations, static (TST-PERSIST-070 to 074):**
+  - exactly three tables, in dependency order;
+  - reversible downs;
+  - keys, uniqueness, and the pending index;
+  - the pinned format;
+  - misnamed or orphan files refused.
+- **Boundaries:** TST-BOUNDARY-025 to 028 and an extended TST-BOUNDARY-024. TST-LIVE-095 and 096 now also scan `src/persistence/` and the adapter.
+- **PostgreSQL integration (`postgres.db.test.ts`, 9 tests, TST-PERSIST-DB-001 to 009), BLOCKED here:**
+  - migrations on PostgreSQL 18, then down and up again;
+  - constraints;
+  - replay after restart (§31);
+  - finish-event restart (§32);
+  - failure injection with test-only triggers at the state update, binding insert, and outbox insert (§33);
+  - a real two-writer race;
+  - outbox uniqueness;
+  - JSONB corruption;
+  - index use.
+  They need `CHESS_ONE_TEST_DATABASE_URL` pointing at a local database whose name ends in `_test`. Each test runs in its own schema, dropped afterwards.
+- Mutation checks were not run in this batch: the attempted run was blocked by the session's command review and the mutation was reverted immediately.
+
+### Gates (Node 24.21.0, pnpm 12.7.0, TypeScript 7.0.2)
+
+- typecheck, lint, format:check, check:boundaries, test, test:rules, check, and audit all pass (exit 0). Audit: no known vulnerabilities.
+- 43 test files: 483 passed, 0 failed, 0 skipped, 0 todo.
+  - rules: 291;
+  - boundaries: 28;
+  - live-game: 117;
+  - persistence: 47.
+- `test:db`: 1 file, 9 tests, 9 failed as BLOCKED by the environment (no database). Not counted as passing.
+- No cast, `ts-ignore`, `ts-expect-error`, or `biome-ignore` was added. No `Date`, `performance`, randomness, `process`, filesystem, network, timers, `eval`, or `Function` in live-game or adapter source.
+
+### Retention, observability, performance
+
+- Bindings and outbox rows are kept for the life of the game: no TTL, no deletion path. Archive and retention policy is TBD.
+- No telemetry or logging library. Errors carry kinds, field paths, and SQLSTATEs only.
+- Every statement addresses one game by primary key, the binding key, or the pending-outbox index; there is no table scan in the runtime path.
+
+### Remaining gaps
+
+- The PostgreSQL integration tests must be run on a local PostgreSQL 18 test database before any PostgreSQL correctness claim.
+- LIVE-RECOVERY-CLOCK-001 needs an owner decision; until then, a running game cannot continue after a writer restart.
+- No outbox dispatcher or publication, and no envelope assembly.
+- Retention and archive policy is TBD.
+- Every command loads all of the game's bindings (one indexed read per game); a single-binding lookup is a possible later optimization.
+- The host owns pool lifecycle and pg idle-client error handling.
+- No transport, reconnect, lease replacement, abort, or abandonment.
+- *Later status (Batch 8.1):* the first two gaps are closed: the integration tests pass on PostgreSQL 18.6, and LIVE-RECOVERY-CLOCK-001 is resolved. The rest remain.
+
+## PHASE 1 / BATCH 8.1 — REAL POSTGRESQL VERIFICATION + CRASH CLOCK RECOVERY POLICY
+
+Owner-authorized (2026-09-29). Implemented, **uncommitted** together with Batch 8, awaiting review. `HEAD` stays `bee3f128d9b4239f7bcb4a753e272b502f61be8d`. No remote, no push. Batch 9 is not started.
+
+### Owner decision: LIVE-RECOVERY-CLOCK-001 RESOLVED
+
+- **Pause on writer clock-domain loss; preserve committed balances; no player is charged for server/process downtime.**
+- `server/live-game/src/persistence/writer.ts`:
+  - `gameCondition(stored, clockDomainId)` gives one of four conditions:
+    - `running`: active, with the clock running in this writer's domain;
+    - `finished`;
+    - `rules_unresolved`;
+    - `recovery_paused`, with reason `RECOVERY_PAUSED_CLOCK_DOMAIN_CHANGED`, the last committed balances, the active side, and the stored clock domain.
+  - `loadForWriter` loads a game with its condition; loading never writes.
+  - `executeCommand` on a paused game replays a stored binding unchanged and refuses every other command with the pause. `executeDeadline` refuses with the pause. Neither writes.
+- The pause is not a `GameStatus`, not `MATING_POSSIBILITY_UNRESOLVED`, and has no `GameResult`. It is derived from durable columns (a running clock and another `clock_domain_id`), so it needs no write, no sequence step, and no event.
+- Nothing compares the stored monotonic anchor with the new writer's clock, and wall clock never measures downtime. DEC-063 and the same-domain path are unchanged.
+- **LIVE-RECOVERY-RESUME-001 (OPEN):** the reconnect/resume operation that ends a pause and re-anchors the clock in the new domain is deferred to the realtime/reconnect phase. It is not implemented, so a paused game stays paused.
+
+### Local PostgreSQL (development and test only)
+
+- **Version:** PostgreSQL 18.6, the current 18.x minor according to postgresql.org's versioning page on 2026-09-29. It is a stable release, not an RC, beta, or nightly build.
+- **Source:** EDB, the Windows distribution linked from postgresql.org/download/windows.
+  - The installer `postgresql-18.6-1-windows-x64.exe` (SHA-256 `CAE561E98D09F3F4A1A95759249240F86F66D71DCF33D14B6F7BE894078401D1`) has a valid Authenticode signature: signer EnterpriseDB Corporation, issued by DigiCert Trusted G4 Code Signing RSA4096 SHA384 2021 CA1, with a DigiCert timestamp.
+  - It was run only in `--extract-only` mode, without pgAdmin or StackBuilder. That mode creates no cluster, Windows service, registry entry, or firewall rule.
+  - EDB's zip archive was also compared: all 69 `bin` and 146 `lib` files are byte-identical to the signed installer's. The zip itself is not used.
+- **Location:** user profile only, outside the repository (`%LOCALAPPDATA%\chess-one-dev`), for the binaries, the data directory, and the local secrets.
+- **Server:** started with `pg_ctl` as a user process, not a service. `listen_addresses = 'localhost'` and port 5432, so it listens on `127.0.0.1` and `::1` only. `pg_hba.conf` allows SCRAM-SHA-256 from loopback only. No firewall rule was added.
+- **Roles:**
+  - The cluster superuser `chess_one_admin` has a random password kept in the user profile.
+  - The test role `chess_one_test` has LOGIN only: NOSUPERUSER, NOCREATEDB, NOCREATEROLE, NOREPLICATION, NOBYPASSRLS, NOINHERIT. It owns the database `chess_one_test`, so it can create and drop its own schemas there.
+  - PUBLIC's CONNECT and TEMPORARY rights on `postgres` and `template1` were revoked, so the test role cannot connect elsewhere.
+- **Credentials:** `CHESS_ONE_TEST_DATABASE_URL` is set as a Windows user environment variable. No password or URL is in the repository, and `.env` stays ignored.
+- **No application dependency was added.** Docker, Podman, WSL, cloud database software, Supabase, and production services were not installed.
+
+### Integration tests (`tests/live-game-persistence/postgres.db.test.ts`, 12 tests)
+
+- **Guards:** the URL must name a local host and a database ending in `_test`. Before every destructive setup or cleanup statement, the server's `current_database()` must end in `_test` and the schema must match the suite's generated pattern; otherwise the suite fails closed. It only drops its own schemas and never drops a database. A missing URL fails as BLOCKED, never as a skip.
+- **Verification reads:** "unchanged" is checked through a new connection pool, comparing every stored row, including `updated_at`.
+- **Genuine races:** a third connection holds an EXCLUSIVE lock on `live_games` until PostgreSQL reports every contender waiting on it, so the contending transactions really overlap.
+- **Tests:**
+  - DB-001: migrations from an empty schema to latest on PostgreSQL 18. Checks every table, all 30 named constraints, all 6 indexes (including the partial pending index), the `gen_random_uuid()` default, and the bookkeeping rows. Then down (tables and bookkeeping emptied), up again, an idle re-run, and a usable schema.
+  - DB-002: constraints refuse impossible rows: a bad format, a column/record mismatch, an orphan binding, and an inconsistent publication; a duplicate game is refused.
+  - DB-003: restart replay under both a new and the same clock domain: the original response with `replayedResponse: true`, and identical rows (same sequence, no new binding, no outbox row).
+  - DB-004: checkmate restart: one `game.finished` row with a v4 UUID `event_id` equal to the returned one. A retried commit of the same decision is a concurrency conflict, and replay after restarts in both domains leaves exactly one row.
+  - DB-005: an injected failure at the state update, the binding insert, and the outbox insert each rolls back everything.
+  - DB-006: two connections load sequence 0 and commit concurrently: exactly one wins, the other gets `concurrency_conflict`, and only the winner's state and binding are stored.
+  - DB-007: a duplicate outbox event is refused by `outbox_events_once_per_aggregate_sequence`; 1000 default ids are non-null, distinct, v4 UUIDs.
+  - DB-008: corruption fails closed.
+  - DB-009: index use.
+  - DB-010: concurrent bind-only commits of the same command, and of two commands at the same ordinal, store exactly one binding; the database rejects the loser. Direct inserts are refused by `live_game_command_bindings_pkey` and `live_game_command_bindings_ordinal_key`.
+  - DB-011: a running game stored under domain A is recovery-paused under B. Its committed balances are unchanged, and new moves are refused, whether received at an instant before the old anchor, just after it, or far beyond any deadline. Resignation, draw offer, and deadline are refused too. Stored commands replay. Every row, including `clock_domain_id` and `updated_at`, is unchanged. Back under A, the game runs and charges only same-domain time.
+  - DB-012: finished and rules-unresolved games under another domain load with their own condition, are decided normally (`GameAlreadyFinished`, `MatingPossibilityUnresolved`, no flag), and write nothing.
+- **Writer tests (contract double):**
+  - TST-PERSIST-054 now expects the pause.
+  - TST-PERSIST-059 classifies every fixture under the same and another domain.
+  - TST-PERSIST-060 shows finished and unresolved games decided normally under another domain.
+- **One new DB test failed on its first run, from a defect in the test itself, not in PostgreSQL.** The DB-004 retry plan was built from an in-memory state rather than the state the writer had loaded. `planCommit` compares bindings by identity, so it threw before any SQL ran. The retry plan is now built from a real pre-mate load and committed after the finish. The assertion is unchanged.
+- The Batch 8 suite (9 tests) also passed unchanged against PostgreSQL 18.6 before any 8.1 change.
+
+### Gates (Node 24.21.0, pnpm 12.7.0, TypeScript 7.0.2)
+
+- typecheck, lint, format:check, check:boundaries, test, test:rules, check, audit, and test:db all pass (exit 0). Audit: no known vulnerabilities.
+- Normal suite: 43 files, 485 passed, 0 failed, 0 skipped, 0 todo.
+  - rules: 291;
+  - boundaries: 28;
+  - live-game: 117;
+  - persistence: 49.
+- `test:db`: 1 file, 12 passed, 0 failed, 0 skipped, 0 blocked, on PostgreSQL 18.6.
+- No cast, `ts-ignore`, `ts-expect-error`, or `biome-ignore` was added. No wall-clock or cross-epoch clock arithmetic in live-game or adapter source.
+
+### Remaining gaps
+
+- LIVE-RECOVERY-RESUME-001: no reconnect/resume operation, so a recovery-paused game cannot yet continue under a new writer.
+- No outbox dispatcher or publication, and no envelope assembly.
+- Retention and archive policy is TBD.
+- The least-privilege runtime role (LIVE-PERSIST-004) is documented, not provisioned. The tests run as the owner of their test database.
+- Mutation checks were not run.
+- No transport, reconnect, lease replacement, abort, or abandonment.

@@ -58,6 +58,48 @@ export {
   type PlayerId,
   type Seat,
 } from "./ids.ts";
+export {
+  type ClockDomainId,
+  type CommitError,
+  type CommitPlan,
+  type CommitReceipt,
+  type ConcurrencyConflict,
+  type CreateError,
+  type EventId,
+  type GameAlreadyExists,
+  type GameNotFound,
+  isClockDomainId,
+  isEventId,
+  type LiveGameRepository,
+  type LoadError,
+  type PersistenceFailure,
+  planCommit,
+  type StoredGame,
+} from "./persistence/repository.ts";
+export { encodeGameFinished } from "./persistence/response-codec.ts";
+export {
+  type CommandBindingRecordV1,
+  type CorruptState,
+  decodeGameState,
+  encodeBinding,
+  encodeGameState,
+  LIVE_GAME_STATE_FORMAT,
+  type LiveGameStateRecordV1,
+} from "./persistence/state-codec.ts";
+export {
+  type CommandExecution,
+  type DeadlineExecution,
+  type ExecutionError,
+  executeCommand,
+  executeDeadline,
+  type GameCondition,
+  gameCondition,
+  type LiveGameWriter,
+  type LoadedGame,
+  loadForWriter,
+  type RecoveryPaused,
+  startGame,
+} from "./persistence/writer.ts";
 export { type DeadlineDecision, processCommand, processDeadline } from "./process-command.ts";
 export type {
   DrawRuleDetail,

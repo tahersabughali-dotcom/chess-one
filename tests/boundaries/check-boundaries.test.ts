@@ -337,4 +337,106 @@ describe("TST-BOUNDARY dependency boundaries", () => {
       rulesFor(manifest({}, { ".": "./src/index.ts", "./clock": "./src/clock.ts" })),
     ).toContain("public_entry");
   });
+
+  it("TST-BOUNDARY-025 domain and the live-game core never reach persistence, Kysely, or pg", () => {
+    for (const code of [
+      'import { PostgresLiveGameRepository } from "@chess-one/live-game-persistence";',
+      'import { Kysely } from "kysely";',
+      'import { Migrator } from "kysely/migration";',
+      'import pg from "pg";',
+      'import { Pool } from "pg-pool";',
+    ]) {
+      expect(rulesFor(lg("persistence/a.ts", code)), code).toContain("forbidden_import");
+      expect(rulesFor(cr("a.ts", code)), code).toContain("forbidden_import");
+      expect(rulesFor(gv("a.ts", code)), code).toContain("forbidden_import");
+    }
+    expect(
+      rulesFor(
+        lg("persistence/a.ts", 'import { r } from "../../../live-game-persistence/src/x.ts";'),
+      ),
+    ).toContain("relative_escape");
+  });
+
+  it("TST-BOUNDARY-026 the persistence adapter imports only live-game, the domain, Kysely, pg, and file paths", () => {
+    const lp = (name: string, content: string): SourceFile => ({
+      path: `server/live-game-persistence/src/${name}`,
+      content,
+    });
+    expect(
+      rulesFor(
+        lp(
+          "a.ts",
+          [
+            'import { planCommit } from "@chess-one/live-game";',
+            'import { ok } from "@chess-one/game-values";',
+            'import { formatFen } from "@chess-one/chess-rules";',
+            'import { Kysely } from "kysely";',
+            'import { Migrator } from "kysely/migration";',
+            'import pg from "pg";',
+            'import { readFile } from "node:fs/promises";',
+            'import { join } from "node:path";',
+          ].join("\n"),
+        ),
+      ),
+    ).toEqual([]);
+    for (const code of [
+      'import Fastify from "fastify";',
+      'import { WebSocket } from "ws";',
+      'import Redis from "ioredis";',
+      'import { Kafka } from "kafkajs";',
+      'import pino from "pino";',
+      'import { createServer } from "node:http";',
+      'import { exec } from "node:child_process";',
+      'import { c } from "@chess-one/live-game/src/clock.ts";',
+    ]) {
+      expect(rulesFor(lp("a.ts", code)), code).toContain("forbidden_import");
+    }
+    for (const code of [
+      "const url = process.env.DATABASE_URL;",
+      "const t = Date.now();",
+      "console.log(1);",
+    ]) {
+      expect(rulesFor(lp("a.ts", code)), code).toContain("ambient_access");
+    }
+    expect(
+      rulesFor(lp("a.ts", 'import { s } from "../../live-game/src/persistence/state-codec.ts";')),
+    ).toContain("relative_escape");
+    const manifest = (dependencies: Record<string, string>): SourceFile => ({
+      path: "server/live-game-persistence/package.json",
+      content: JSON.stringify({ exports: { ".": "./src/index.ts" }, dependencies }),
+    });
+    expect(
+      rulesFor(
+        manifest({
+          "@chess-one/game-values": "workspace:*",
+          "@chess-one/live-game": "workspace:*",
+          kysely: "0.29.6",
+          pg: "8.23.0",
+        }),
+      ),
+    ).toEqual([]);
+    for (const name of ["prisma", "drizzle-orm", "typeorm", "redis", "kafkajs", "pino"]) {
+      expect(rulesFor(manifest({ [name]: "1.0.0" })), name).toContain("forbidden_dependency");
+    }
+  });
+
+  it("TST-BOUNDARY-027 clients never import persistence or database drivers", () => {
+    const client = (content: string): SourceFile => ({ path: "clients/web/src/a.ts", content });
+    for (const code of [
+      'import { PostgresLiveGameRepository } from "@chess-one/live-game-persistence";',
+      'import { Kysely } from "kysely";',
+      'import { Migrator } from "kysely/migration";',
+      'import pg from "pg";',
+      'import { parse } from "pg-connection-string";',
+    ]) {
+      expect(rulesFor(client(code)), code).toContain("client_imports_persistence");
+    }
+    expect(rulesFor(client('import { x } from "@chess-one/game-values";'))).toEqual([]);
+    expect(
+      rulesFor({
+        path: "clients/web/package.json",
+        content: JSON.stringify({ dependencies: { pg: "8.23.0", kysely: "0.29.6" } }),
+      }),
+    ).toEqual(["client_imports_persistence", "client_imports_persistence"]);
+  });
 });
