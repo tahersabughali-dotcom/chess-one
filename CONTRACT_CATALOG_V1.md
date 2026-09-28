@@ -271,7 +271,7 @@ SQ-DGM-10 يبقى صحيحًا كقدرة: لعب ثم طلب تثبيت ثم �
 ## 10. Draw, offer, and resignation commands / أوامر التعادل والاستقالة
 
 هذه أوامر توثيق فقط. لا تنفيذ في هذه الدفعة. كلها أوامر سلطة المباراة الحية.  
-*Later status:* `ClaimDrawCommand.v1` (Phase 1 Batch 5) and `ResignGameCommand.v1` (Batch 6) are implemented in the pure in-memory live-game authority. Offer and response commands are not. العميل لا يرسل نتيجة، ولا FEN، ولا SAN كسلطة.
+*Later status:* `ClaimDrawCommand.v1` (Phase 1 Batch 5), `ResignGameCommand.v1` (Batch 6), and `OfferDrawCommand.v1` and `RespondDrawOfferCommand.v1` (Batch 7) are implemented in the pure in-memory live-game authority, as written in 10.2 and 10.3: out-of-rule offers and responses are `InvalidState`, `offer_id` is the game sequence that committed the offer, and a committed move by the recipient declines the offer. Implementation choices within these sections are recorded in `PHASE_1_IMPLEMENTATION_LOG.md` (Batch 7). العميل لا يرسل نتيجة، ولا FEN، ولا SAN كسلطة.
 
 الحقول المشتركة مع `SubmitMoveCommand.v1`: `contract_version`, `game_id`, `session_id`, `control_lease_id`, `client_command_id`, `expected_game_sequence`, و`actor_id` الاختياري للمطابقة فقط. ترتيب السلطة في القسم 2.1 ينطبق. `replayed_response` ينطبق. البصمة تشمل نوع الأمر وحقوله الدلالية، لا وقت العميل.
 
@@ -298,6 +298,8 @@ SQ-DGM-10 يبقى صحيحًا كقدرة: لعب ثم طلب تثبيت ثم �
 ### 10.2 OfferDrawCommand.v1
 
 يُقبل الشكل فقط إذا كان دور الخصم بعد نقلة مكتملة من مقدّم العرض، وكان الطرفان قد لعبا نقلة واحدة على الأقل، وإلا `InvalidState` بلا عرض. لا شروط مرفقة. العرض يبقى حتى القبول أو الرفض أو انتهاء المباراة بسبب آخر. نقلة من المستلم تُعد رفضًا. إعادة نفس `client_command_id` بنفس البصمة تعيد القرار الأصلي.
+
+**Later approved policy — LIVE-OFFER-006 (RESOLVED, Batch 7 closure): one draw offer per committed move.** A player may make at most one offer based on their most recent committed move. After a decline, a new offer by the same player on the same move is `InvalidState` (detail `draw_offer_already_used_for_move`); a new opportunity exists only after another legal move is committed. No time cooldown or numeric quota applies. / عرض تعادل واحد لكل نقلة ملتزمة: بعد الرفض لا يعيد اللاعب العرض قبل نقلة قانونية جديدة.
 
 ### 10.3 RespondDrawOfferCommand.v1
 

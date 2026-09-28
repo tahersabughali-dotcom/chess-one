@@ -59,11 +59,14 @@ describe("Golden ledger coverage", () => {
     }
   });
 
-  describe("NOT_IMPLEMENTED ledger rows (reported as todo, never as passing)", () => {
-    for (const [id, entry] of Object.entries(LEDGER_STATUS)) {
-      if (entry.status === "NOT_IMPLEMENTED") {
-        it.todo(`${id}${entry.fixtureValidated ? " (fixture validated only)" : ""}`);
-      }
-    }
-  });
+  const notImplemented = Object.entries(LEDGER_STATUS).flatMap(([id, entry]) =>
+    entry.status === "NOT_IMPLEMENTED"
+      ? [`${id}${entry.fixtureValidated ? " (fixture validated only)" : ""}`]
+      : [],
+  );
+  if (notImplemented.length > 0) {
+    describe("NOT_IMPLEMENTED ledger rows (reported as todo, never as passing)", () => {
+      for (const title of notImplemented) it.todo(title);
+    });
+  }
 });

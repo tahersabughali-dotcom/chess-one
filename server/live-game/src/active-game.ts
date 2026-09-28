@@ -36,9 +36,19 @@ export type UnauthorizedDetail =
   | "invalid_control_lease"
   | "actor_mismatch";
 
+/** Why a draw offer or response is `InvalidState` (CONTRACT_CATALOG_V1 10.2, 10.3). */
+export type DrawOfferDetail =
+  | "draw_offer_not_allowed"
+  | "draw_offer_already_pending"
+  | "draw_offer_already_used_for_move"
+  | "no_pending_draw_offer"
+  | "not_draw_offer_recipient"
+  | "draw_offer_id_mismatch";
+
 export type ResponseDetail =
   | CommandShapeError
   | UnauthorizedDetail
+  | DrawOfferDetail
   | "illegal_move"
   | "promotion_required"
   | "promotion_unexpected";
@@ -76,6 +86,18 @@ export interface CommandBinding {
 }
 
 /**
+ * The one pending draw offer (CONTRACT_CATALOG_V1 10.2): live-game state, not
+ * chat, a notification, or a stored record. `createdAtSequence` is the game
+ * sequence of the transition that committed the offer; no other transition has
+ * that sequence, so it is also the offer's server id (`offer_id`, 10.3).
+ */
+export interface PendingDrawOffer {
+  readonly offeredBy: Seat;
+  readonly offeredTo: Seat;
+  readonly createdAtSequence: GameSequence;
+}
+
+/**
  * The authoritative state of one live game (DEC-045). It is frozen; only
  * `createActiveGame`, `processCommand`, and `processDeadline` produce valid
  * states, and a reconnect snapshot can later be read from it directly.
@@ -93,6 +115,14 @@ export interface ActiveGameState {
   readonly sequence: GameSequence;
   readonly clock: ClockState;
   readonly status: GameStatus;
+  /** Never set unless `status` is active: every committed stop clears it. */
+  readonly pendingDrawOffer: PendingDrawOffer | null;
+  /**
+   * Committed move count (`history.length - 1`) of the last accepted draw
+   * offer, or null before any offer. One offer per committed move
+   * (LIVE-OFFER-006); a decline does not reset it.
+   */
+  readonly lastDrawOfferMove: number | null;
   readonly commandBindings: readonly CommandBinding[];
 }
 
@@ -150,6 +180,8 @@ export function createActiveGame(game: NewGame): Result<ActiveGameState, NewGame
       sequence: INITIAL_SEQUENCE,
       clock,
       status: ACTIVE,
+      pendingDrawOffer: null,
+      lastDrawOfferMove: null,
       commandBindings: Object.freeze([]),
     }),
   );

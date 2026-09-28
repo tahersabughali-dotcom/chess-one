@@ -10,8 +10,9 @@ function moveText(move: MoveIntent | undefined): string {
 /**
  * CONTRACT_CATALOG_V1 2.6 and 10: the semantic payload after normalization,
  * as canonical text rather than a hash, so equality is exact. It binds the
- * command name and version, `game_id`, the control lease, and the move or
- * claim fields; a resignation has no further fields. The lease has already
+ * command name and version, `game_id`, the control lease, and the move,
+ * claim, or draw-offer response fields (`offer_id` and the decision); a
+ * resignation and a draw offer have no further fields. The lease has already
  * been checked against the seat's current lease, so a controller under a
  * replacement lease never receives a decision stored for an earlier lease. It
  * never includes client time, client SAN, `actor_id`,
@@ -20,12 +21,19 @@ function moveText(move: MoveIntent | undefined): string {
  */
 export function fingerprintOf(command: ParsedCommand): string {
   const envelope = `${command.name} ${command.gameId} ${command.controlLeaseId}`;
-  if (command.kind === "resign_game") return envelope;
-  const payload =
-    command.kind === "submit_move"
-      ? moveText(command.move)
-      : `${command.claim.kind} ${moveText("intended" in command.claim ? command.claim.intended : undefined)}`;
-  return `${envelope} ${payload}`;
+  switch (command.kind) {
+    case "resign_game":
+    case "offer_draw":
+      return envelope;
+    case "respond_draw_offer":
+      return `${envelope} ${command.offerId} ${command.decision}`;
+    case "submit_move":
+      return `${envelope} ${moveText(command.move)}`;
+    case "claim_draw": {
+      const intended = "intended" in command.claim ? command.claim.intended : undefined;
+      return `${envelope} ${command.claim.kind} ${moveText(intended)}`;
+    }
+  }
 }
 
 /** The binding decision stored for this seat and client command id, if any. */

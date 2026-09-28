@@ -28,19 +28,18 @@
  * with the corrected one, the opponent's PROVEN_CAN_MATE (the whole-position
  * detector never returns `NOT_DEAD`). Row 015a's `InvalidState` is
  * superseded by `GameAlreadyFinished` (LIVE-CONTRACT-006, resolved in Batch
- * 6.1). Draw offers are not implemented. Every
- * IMPLEMENTED or PARTIAL row must be named by an executable test
+ * 6.1).
+ *
+ * Batch 7 adds the draw-offer state machine: rows 017a to 017c are asserted
+ * through `OfferDrawCommand.v1`, `RespondDrawOfferCommand.v1`, and a
+ * recipient's `SubmitMoveCommand.v1` in tests/live-game/draw-offer.test.ts.
+ * Every IMPLEMENTED or PARTIAL row must be named by an executable test
  * (ledger-status.test.ts).
  */
 export type LedgerStatus =
   | { readonly status: "IMPLEMENTED" }
   | { readonly status: "PARTIAL"; readonly pending: string }
   | { readonly status: "NOT_IMPLEMENTED"; readonly fixtureValidated: boolean };
-
-const notImplemented = (fixtureValidated = false): LedgerStatus => ({
-  status: "NOT_IMPLEMENTED",
-  fixtureValidated,
-});
 
 const implemented: LedgerStatus = { status: "IMPLEMENTED" };
 
@@ -74,9 +73,9 @@ export const LEDGER_STATUS: Readonly<Record<string, LedgerStatus>> = {
   "TST-RULE-E01-016c": implemented,
   "TST-RULE-E01-016d": implemented,
   "TST-RULE-E01-016e": implemented,
-  "TST-RULE-E01-017a": notImplemented(),
-  "TST-RULE-E01-017b": notImplemented(),
-  "TST-RULE-E01-017c": notImplemented(),
+  "TST-RULE-E01-017a": implemented,
+  "TST-RULE-E01-017b": implemented,
+  "TST-RULE-E01-017c": implemented,
   "TST-RULE-E01-018": implemented,
   "TST-RULE-E01-018b": implemented,
   "TST-RULE-E01-019": implemented,

@@ -39,6 +39,7 @@ import {
   NO_EVENTS,
   reject,
 } from "./decision.ts";
+import { offerDraw, respondDrawOffer } from "./draw-offer.ts";
 import type { GameFinishedV1 } from "./events.ts";
 import {
   type DrawRuleDetail,
@@ -55,7 +56,11 @@ export interface DeadlineDecision {
   readonly events: readonly GameFinishedV1[];
 }
 
-/** Commits a legal move: history grows by one key, then terminal facts decide the clock. */
+/**
+ * Commits a legal move: history grows by one key, then terminal facts decide
+ * the clock. The mover is the recipient of any pending draw offer, so the move
+ * declines it in this same transition (CONTRACT_CATALOG_V1 10.2).
+ */
 function playMove(
   attempt: JudgedAttempt,
   charged: ClockState,
@@ -70,7 +75,8 @@ function playMove(
   const history = Object.freeze([...state.history, repetitionKey(position)]);
   const status = statusFromFacts(positionFacts(history, position));
   const clock = status.kind === "active" ? passTurn(charged) : stopClock(charged);
-  return commitAndBind(attempt, { position, history, clock, status }, code, null, san);
+  const changes: Changes = { position, history, clock, status, pendingDrawOffer: null };
+  return commitAndBind(attempt, changes, code, null, san);
 }
 
 function sanOf(position: Position, move: MoveIntent): string {
@@ -196,17 +202,21 @@ function authorizationFailure(
  * 4. a finished game is `GameAlreadyFinished` (not bound); an unresolved game
  *    is rejected with its reason (not bound);
  * 5. a move or claim seat must be the side to move (`NotYourTurn`, bound); a
- *    resignation is accepted on either turn;
+ *    resignation is accepted on either turn, and a draw offer or response
+ *    checks its own seat rule in `draw-offer.ts`;
  * 6. `expected_game_sequence` must be current (`StaleSequence`, not bound);
  * 7. deadline at `received_at` for the active side: a late command is not
  *    applied and commits the flag transition (`MoveReceivedAfterDeadline`,
  *    bound). The flag fell before the command arrived, so a late resignation
- *    is decided as that flag (LIVE-RESIGN-001);
- * 8. legality through chess-rules, then the move, claim, or resignation.
+ *    is decided as that flag (LIVE-RESIGN-001), and a late acceptance of a
+ *    draw offer creates no draw;
+ * 8. legality through chess-rules, then the move, claim, resignation, draw
+ *    offer, or response.
  *
  * Every client command that reaches a committed transition (an accepted move,
- * a correct or incorrect claim, a resignation, or a late command that commits
- * the flag) is bound in the same returned state, under the one lease-scoped
+ * a correct or incorrect claim, a resignation, a draw offer or response, or a
+ * late command that commits the flag) is bound in the same returned state,
+ * under the one lease-scoped
  * fingerprint, and a transition that finishes the game carries its one
  * `game.finished.v1`. Replay comes before the finished and unresolved guards,
  * so a stored decision is still replayed after the game stops, with no event.
@@ -214,7 +224,9 @@ function authorizationFailure(
  * state object, and no binding is added after the finish. A rejected command
  * changes no clock field: the server clock keeps running from the turn anchor,
  * so time before a rejection is still charged by the next committed
- * transition or flag.
+ * transition or flag. A pending draw offer is cleared only by a committed
+ * move, a committed response, or a committed stop of the game; no rejection
+ * clears it.
  */
 export function processCommand(
   state: ActiveGameState,
@@ -257,8 +269,8 @@ export function processCommand(
         : "TerminalPrecedenceUnresolved",
     );
   }
-  const resigning = parsedCommand.kind === "resign_game";
-  if (!resigning && actor.seat !== state.position.sideToMove) {
+  const turnBound = parsedCommand.kind === "submit_move" || parsedCommand.kind === "claim_draw";
+  if (turnBound && actor.seat !== state.position.sideToMove) {
     return bindRejection(judged, "NotYourTurn");
   }
   if (parsedCommand.expectedGameSequence !== state.sequence)
@@ -269,10 +281,18 @@ export function processCommand(
     const flagged = flagTransition(state, receivedAt);
     return boundCommitted(judged, flagged, "MoveReceivedAfterDeadline", null, null);
   }
-  if (parsedCommand.kind === "resign_game") return resignGame(judged);
-  return parsedCommand.kind === "submit_move"
-    ? submitMove(judged, parsedCommand.move)
-    : claimDraw(judged, parsedCommand.claim);
+  switch (parsedCommand.kind) {
+    case "submit_move":
+      return submitMove(judged, parsedCommand.move);
+    case "claim_draw":
+      return claimDraw(judged, parsedCommand.claim);
+    case "resign_game":
+      return resignGame(judged);
+    case "offer_draw":
+      return offerDraw(judged);
+    case "respond_draw_offer":
+      return respondDrawOffer(judged, parsedCommand.offerId, parsedCommand.decision);
+  }
 }
 
 /**

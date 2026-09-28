@@ -51,7 +51,7 @@ export interface JudgedAttempt extends Attempt {
 }
 
 export type Changes = Pick<ActiveGameState, "clock" | "status"> &
-  Partial<Pick<ActiveGameState, "position" | "history">>;
+  Partial<Pick<ActiveGameState, "position" | "history" | "pendingDrawOffer" | "lastDrawOfferMove">>;
 
 export const NO_EVENTS: readonly GameFinishedV1[] = Object.freeze([]);
 
@@ -118,11 +118,16 @@ export function bindRejection(
   );
 }
 
-/** A committed transition advances the sequence by exactly one. */
+/**
+ * A committed transition advances the sequence by exactly one. A transition
+ * that stops the game, finished or unresolved, also drops any pending draw
+ * offer, so no offer can be accepted after a result, a flag, or a resignation.
+ */
 export function commit(state: ActiveGameState, changes: Changes): ActiveGameState {
   const sequence = nextGameSequence(state.sequence);
   if (!sequence.ok) defect("sequence overflow");
-  return Object.freeze({ ...state, ...changes, sequence: sequence.value });
+  const next = { ...state, ...changes, sequence: sequence.value };
+  return Object.freeze(next.status.kind === "active" ? next : { ...next, pendingDrawOffer: null });
 }
 
 /**

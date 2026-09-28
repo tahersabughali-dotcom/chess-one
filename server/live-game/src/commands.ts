@@ -20,14 +20,18 @@ import {
   type PlayerId,
 } from "./ids.ts";
 
-/** Versioned command names (CONTRACT_CATALOG_V1 sections 2, 10.1, and 10.4). */
+/** Versioned command names (CONTRACT_CATALOG_V1 sections 2 and 10.1 to 10.4). */
 export const SUBMIT_MOVE_COMMAND_V1 = "SubmitMoveCommand.v1";
 export const CLAIM_DRAW_COMMAND_V1 = "ClaimDrawCommand.v1";
 export const RESIGN_GAME_COMMAND_V1 = "ResignGameCommand.v1";
+export const OFFER_DRAW_COMMAND_V1 = "OfferDrawCommand.v1";
+export const RESPOND_DRAW_OFFER_COMMAND_V1 = "RespondDrawOfferCommand.v1";
 export type CommandName =
   | typeof SUBMIT_MOVE_COMMAND_V1
   | typeof CLAIM_DRAW_COMMAND_V1
-  | typeof RESIGN_GAME_COMMAND_V1;
+  | typeof RESIGN_GAME_COMMAND_V1
+  | typeof OFFER_DRAW_COMMAND_V1
+  | typeof RESPOND_DRAW_OFFER_COMMAND_V1;
 
 const CONTRACT_VERSION = "1";
 
@@ -71,7 +75,28 @@ export interface ResignGameCommandV1 extends CommandEnvelopeInput {
   readonly command: typeof RESIGN_GAME_COMMAND_V1;
 }
 
-export type LiveGameCommand = SubmitMoveCommandV1 | ClaimDrawCommandV1 | ResignGameCommandV1;
+/** CONTRACT_CATALOG_V1 10.2: no conditions and no free text. */
+export interface OfferDrawCommandV1 extends CommandEnvelopeInput {
+  readonly command: typeof OFFER_DRAW_COMMAND_V1;
+}
+
+/** CONTRACT_CATALOG_V1 10.3. */
+export interface RespondDrawOfferCommandV1 extends CommandEnvelopeInput {
+  readonly command: typeof RESPOND_DRAW_OFFER_COMMAND_V1;
+  /** The pending offer's server id, its `createdAtSequence`. */
+  readonly offerId: number;
+  /** `accept` or `decline`. */
+  readonly decision: string;
+}
+
+export type DrawOfferDecision = "accept" | "decline";
+
+export type LiveGameCommand =
+  | SubmitMoveCommandV1
+  | ClaimDrawCommandV1
+  | ResignGameCommandV1
+  | OfferDrawCommandV1
+  | RespondDrawOfferCommandV1;
 
 /** Shape failures, answered as `InvalidState` before any authority or identity check. */
 export type CommandShapeError =
@@ -84,7 +109,9 @@ export type CommandShapeError =
   | "malformed_expected_sequence"
   | "unknown_claim_kind"
   | "missing_intended_move"
-  | "unexpected_intended_move";
+  | "unexpected_intended_move"
+  | "malformed_offer_id"
+  | "unknown_draw_offer_decision";
 
 interface ParsedEnvelope {
   readonly name: CommandName;
@@ -98,7 +125,13 @@ interface ParsedEnvelope {
 export type ParsedCommand =
   | (ParsedEnvelope & { readonly kind: "submit_move"; readonly move: MoveIntent })
   | (ParsedEnvelope & { readonly kind: "claim_draw"; readonly claim: DrawClaim })
-  | (ParsedEnvelope & { readonly kind: "resign_game" });
+  | (ParsedEnvelope & { readonly kind: "resign_game" })
+  | (ParsedEnvelope & { readonly kind: "offer_draw" })
+  | (ParsedEnvelope & {
+      readonly kind: "respond_draw_offer";
+      readonly offerId: GameSequence;
+      readonly decision: DrawOfferDecision;
+    });
 
 /** Case and surrounding whitespace are normalized; an empty promotion is the same as none. */
 function parseIntent(
@@ -155,6 +188,15 @@ export function parseCommand(command: LiveGameCommand): Result<ParsedCommand, Co
   }
   if (command.command === RESIGN_GAME_COMMAND_V1) {
     return ok({ ...envelope.value, kind: "resign_game" });
+  }
+  if (command.command === OFFER_DRAW_COMMAND_V1) {
+    return ok({ ...envelope.value, kind: "offer_draw" });
+  }
+  if (command.command === RESPOND_DRAW_OFFER_COMMAND_V1) {
+    const { offerId, decision } = command;
+    if (!isGameSequence(offerId)) return err("malformed_offer_id");
+    if (decision !== "accept" && decision !== "decline") return err("unknown_draw_offer_decision");
+    return ok({ ...envelope.value, kind: "respond_draw_offer", offerId, decision });
   }
   const claim = parseClaim(command);
   return claim.ok ? ok({ ...envelope.value, kind: "claim_draw", claim: claim.value }) : claim;

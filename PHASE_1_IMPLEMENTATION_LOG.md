@@ -1210,11 +1210,11 @@ Owner-authorized. Baseline is the Batch 5 commit `d152afc` ("feat: add authorita
 - GAP-MATE-004b: no general one-sided algorithm. Every position outside the reviewed classes is `UNKNOWN` and stays unresolved.
 - GAP-MATE-001: the product policy for `UNKNOWN` is still undecided.
 - LIVE-CONTRACT-006 (OPEN) and LIVE-RESIGN-001 (policy gap) need owner review. (*Both resolved in Batch 6.1.*)
-- Draw offers and agreement, abort, persistence, outbox, transport, and reconnect are not built.
+- Draw offers and agreement, abort, persistence, outbox, transport, and reconnect are not built. (*Draw offers and agreement: built in Batch 7.*)
 
 ## PHASE 1 / BATCH 6.1 — MATING CAPABILITY SEMANTICS CORRECTION
 
-Owner-directed correction after the independent Batch 6 review. Baseline `d152afc`. Batch 6 and 6.1 are uncommitted. No remote, no push. Batch 7 is not authorized. No change to move legality, SAN, repetition, the 50/75-move implementation, or dependencies.
+Owner-directed correction after the independent Batch 6 review. Baseline `d152afc`. Batch 6 and 6.1 are uncommitted (*committed together as `0878d93` at the start of Batch 7*). No remote, no push. Batch 7 is not authorized. No change to move legality, SAN, repetition, the 50/75-move implementation, or dependencies.
 
 ### Root cause
 
@@ -1269,3 +1269,174 @@ The Batch 6 witness treated game-ending draw rules as part of the capability pre
   - live-game: 86.
 - Perft, SAN, repetition, and draw-rule tests are unchanged.
 - Dependencies added: 0. No cast or suppression was added.
+
+## PHASE 1 / BATCH 7 — DRAW OFFER STATE MACHINE — LIVE GAME CORE COMPLETION
+
+Owner-authorized after the Batch 6 and 6.1 reviews passed. Batch 8 is not authorized. This batch builds no PostgreSQL, Kysely, persistence, outbox, Fastify, WebSocket, reconnect transport, matchmaking, rating, web UI, tournament, AI, draw-offer chat or UI, or abort policy.
+
+### Stage A: commit of Batch 6 and 6.1
+
+- Baseline check before the commit: `pnpm check` 401 passed, 0 failed, 0 skipped, 3 todo; `pnpm audit` no known vulnerabilities.
+- Commit `0878d9368d7096a344fb1eef9bf9c7664ba9b1c1` (`0878d93`), "feat: add one-sided mating adjudication". Parent `d152afc`. 32 files: the 22 modified and 10 new Batch 6 and 6.1 files.
+- Excluded, verified: review ZIPs (ignored by `CHESS_ONE_*_REVIEW*.zip`), `node_modules`, build output, secrets. A scan of the committed files found only prose mentions of "secret". Git config unchanged. No remote, no push.
+- Batch 7 is uncommitted.
+
+### Model
+
+- `ActiveGameState.pendingDrawOffer: PendingDrawOffer | null`, with `PendingDrawOffer = { offeredBy, offeredTo, createdAtSequence }`, frozen. No text, wall clock, label, notification, or timestamp. `createActiveGame` starts with `null`.
+- `createdAtSequence` is the game sequence of the transition that committed the offer. It is also the server `offer_id` of contract 10.3 (LIVE-OFFER-001): each sequence is committed once, so no generated id is needed.
+- "Both players have moved" comes from committed history, not from `sequence`: only a committed move appends a repetition key, so `history.length - 1` counts moves since the start position. Moves alternate, so two moves mean each side has moved, and the seat not to move made the last move. No new state field and no PGN.
+- Invariant: an offer exists only while the status is `active`, and it always belongs to the seat not to move (`offeredTo` is the side to move). `commit` in `decision.ts` clears the offer whenever the committed status is not `active`. `playMove` clears it on every committed move.
+
+### Commands
+
+- `OfferDrawCommand.v1`: envelope fields only. `RespondDrawOfferCommand.v1`: `offerId` (a non-negative integer, else `malformed_offer_id`) and `decision` (exactly `accept` or `decline`, else `unknown_draw_offer_decision`). Shape errors are unbound `InvalidState`.
+- Both pass the full contract 2.3 order: shape, trusted actor (game, player, seat, lease, `actor_id` echo), identity and replay, finished and unresolved guards, sequence, deadline. They skip the generic `NotYourTurn` check, like a resignation, because each has its own seat rule.
+- **Offer** (contract 10.2, article 5.2.3), in this order:
+  1. an offer already pending: `InvalidState` `draw_offer_already_pending`. This applies to either seat; the recipient's offer is not an acceptance;
+  2. fewer than two committed moves, or the offerer is the side to move: `InvalidState` `draw_offer_not_allowed`;
+  3. otherwise: `Accepted`. The sequence goes up by one, the offer is stored, and the binding is stored. The clock object, position, history, and status are unchanged, and no event is emitted.
+- **Response** (contract 10.3), in this order:
+  1. no pending offer: `InvalidState` `no_pending_draw_offer`;
+  2. the responder is not `offeredTo`, for example the offerer: `InvalidState` `not_draw_offer_recipient`;
+  3. `offerId` does not match: `InvalidState` `draw_offer_id_mismatch`;
+  4. `accept`: status `finished` with `{ resultCode: "draw", terminationReason: "draw_agreed" }` (a new `GameResult` variant with no draw-rule detail, contract section 5). The recipient is charged to receipt, the clock stops, the offer clears, the sequence goes up by one, one `game.finished.v1` is emitted with the response command's provenance, and the binding is stored;
+  5. `decline`: the offer clears. The sequence goes up by one and the binding is stored. The clock object, position, history, and status are unchanged, and no event is emitted.
+- Out-of-rule offers and responses are bound, like `IllegalMove`, so a retry replays the same answer (LIVE-OFFER-002). No new `ResponseCode`: the contract says `InvalidState`, and the detail makes each cause specific.
+
+### Interactions
+
+| Situation while an offer is pending | Result |
+|---|---|
+| Recipient's legal move | Applied and judged on its own (checkmate stays checkmate). The offer clears in the same transition: one sequence step, no extra event or command (row 017c) |
+| Recipient's illegal move | `IllegalMove`, bound. The offer stays |
+| Unauthorized, StaleSequence, InvalidState, InvalidCommandIdentity, NotYourTurn, a mismatched response, the offerer's response | Nothing committed. The offer stays (the same object) |
+| Correct claim | Finished by the claim. The offer clears |
+| Incorrect current claim | Penalty committed, no move. The offer stays |
+| Incorrect intended claim with a legal move | Penalty and move in one transition. The offer clears |
+| Incorrect intended claim with an illegal move | Penalty committed, no move (`IllegalMove`). The offer stays |
+| Resignation by either seat | The resignation decides: a win, `resign_no_mate_possible`, or unresolved. It never becomes `draw_agreed`. The offer clears, including when unresolved (UNKNOWN) |
+| Flag (writer deadline or late command) | The flag decides. The offer clears, resolved or unresolved. A later response is `GameAlreadyFinished` or the unresolved code |
+| Offer or response received after the deadline | Not applied; the flag is committed (`MoveReceivedAfterDeadline`). A late acceptance creates no draw (LIVE-OFFER-003) |
+| After the game finished | A new offer or response is `GameAlreadyFinished`, unbound, same state object. Stored bindings still replay first |
+
+### Identity
+
+- Offer fingerprint: `OfferDrawCommand.v1 <game_id> <control_lease_id>`.
+- Response fingerprint: `RespondDrawOfferCommand.v1 <game_id> <control_lease_id> <offer_id> <decision>`. The contract lists `offer_id` as a required semantic field, so it is part of the fingerprint.
+- Excluded: client time, `actor_id`, `expected_game_sequence`, and UI metadata. `client_command_id` is the lookup key with the seat.
+- An exact replay returns the stored response with `replayedResponse: true` and the same state object, and adds no sequence or event. The same id with another command (for example `decline` then `accept`) is `InvalidCommandIdentity`.
+
+### Structure
+
+- New `server/live-game/src/draw-offer.ts` (79 lines): `offerDraw` and `respondDrawOffer`.
+- `process-command.ts` 298 to 318 lines: dispatch by `switch`, the narrower turn check, and doc comments. `commands.ts` 203, `active-game.ts` 180, `decision.ts` 178. `mating-witness.ts` (308) is unchanged.
+- No unrelated refactor.
+
+### Golden rows 017a to 017c
+
+| Row | Status | Test |
+|---|---|---|
+| 017a | IMPLEMENTED | TST-LIVE-150: no seat may offer before any move, or after one move; `InvalidState`, no offer |
+| 017b | IMPLEMENTED | TST-LIVE-155: after each side has moved, offer then accept ends `draw_agreed`, with one event and no event on replay |
+| 017c | IMPLEMENTED | TST-LIVE-160 (the legal move declines in the same transition) and TST-LIVE-161 (a mating reply is checkmate, not a draw) |
+
+No ledger row is NOT_IMPLEMENTED any more, so the todo count is 0. `ledger-status.test.ts` still reports any future NOT_IMPLEMENTED row as todo. It now registers that suite only when such a row exists, because Vitest fails an empty suite. The `notImplemented` helper in `fixtures/ledger-status.ts` was unused and was removed; the `NOT_IMPLEMENTED` status type is kept.
+
+### Tests
+
+- `tests/live-game/draw-offer.test.ts`, TST-LIVE-150 to 175:
+  - timing (150, 151);
+  - pending state (152);
+  - a second offer from either seat (153);
+  - late offer (154);
+  - accept (155);
+  - the offerer's response (156);
+  - decline with replay (157);
+  - no pending offer or a mismatched id (158);
+  - malformed responses (159);
+  - legal and mating moves (160, 161);
+  - illegal move (162);
+  - every non-committing rejection (163);
+  - claims (164 to 167);
+  - resignation, resolved and UNKNOWN (168, 169);
+  - flag, resolved and unresolved, with late and on-time acceptance (170, 171);
+  - post-terminal commands and replays (172);
+  - offer replay (173);
+  - identity conflicts (174);
+  - fingerprints (175).
+- `tests/live-game/draw-offer.property.test.ts`, TST-LIVE-180. It runs 100 seeded random sessions of 10 to 40 steps: moves, random squares, offers, responses, claims, stale commands, replays, resignations, and writer deadline checks. It checks the invariants below and asserts that each named scenario was reached.
+  - A: at most one offer, never replaced, and always owned by the seat not to move.
+  - B: no offer once the game has stopped.
+  - C: an acceptance is `draw_agreed` with exactly one event.
+  - D: a replay returns the same state.
+  - E: nothing uncommitted clears the offer.
+  - F: a committed move clears it.
+  - G: an illegal move keeps it.
+  - H: an offer or response never changes the position or history.
+- Mutation checks, reverted:
+  - removing both clears (in `playMove` and on stop in `commit`) failed 9 unit tests: TST-LIVE-155, 160, 161, 164, 166, and 168 to 171;
+  - removing only the `playMove` clear failed the property test on its first run.
+- The harness gained `offerCommand` and `respondCommand`, and `snapshot` now includes `pendingDrawOffer`. No existing test expectation changed. The only change to an existing test is the conditional todo suite in `ledger-status.test.ts`, described above.
+
+### Documents
+
+- v6 current execution-status block: Batches 1 to 6.1 passed, Batch 6 committed, Batch 7 in progress, Batch 8 not authorized, GAP-MATE-004b open.
+- `CONTRACT_CATALOG_V1.md` section 10 later-status note. There is no normative change and no conflict.
+- `PHASE_0_DECISION_CHANGELOG.md` section 16 (LIVE-OFFER-001 to 006, pending review).
+- `TRACEABILITY_MATRIX_V2.md`: summary, FR-GM-003, FR-GM-009, FR-P06-005 later-status note, and FR-P06-007. No status change.
+
+### Final live-game core review
+
+- Commands decided: `SubmitMoveCommand.v1`, `ClaimDrawCommand.v1`, `ResignGameCommand.v1`, `OfferDrawCommand.v1`, and `RespondDrawOfferCommand.v1`. These are all the live-game commands named in `CONTRACT_CATALOG_V1.md`. There is also the writer's own deadline check (`processDeadline`).
+- Remaining categories, none of them a command contract yet:
+  - reconnect and sync (contract section 3);
+  - control-lease replacement (DEC-043; only a test seam exists);
+  - abort, no-start, and abandonment (`aborted` and `abandonment` result codes exist in section 5, with no approved policy);
+  - `game.move_accepted.v1` and other non-final events;
+  - the outbox and `event_id`;
+  - persistence and recovery;
+  - trusted ingress stamping;
+  - binding retention.
+- Readiness for persistence: the decision core is ready to be wrapped. Every decision is a pure function of state, trusted actor, command, and ingress time. Each committed transition moves the sequence by exactly one. Bindings and the one `game.finished.v1` are produced in the same returned state as the change they belong to. That maps onto one database transaction with an outbox row. Decisions a persistence batch has to make first:
+  - a serialized form for `Position`, `RepetitionKey` history, and bindings;
+  - binding retention;
+  - `event_id` assignment;
+  - the product policy for unresolved games (GAP-MATE-001).
+  Persistence is not started.
+
+### Gates (Node 24.21.0, pnpm 12.7.0, TypeScript 7.0.2)
+
+- typecheck, lint, format:check, check:boundaries, test, test:rules, check, and audit all pass (exit 0). Audit: no known vulnerabilities.
+- 38 test files: 428 passed, 0 failed, 0 skipped, 0 todo.
+  - rules: 291;
+  - boundaries: 24;
+  - live-game: 113.
+- Dependencies added: 0. `package.json`, `pnpm-lock.yaml`, and the package manifests are unchanged. No cast, `ts-ignore`, `ts-expect-error`, or `biome-ignore` was added. No `Date`, `performance`, randomness, `process`, filesystem, network, timers, `eval`, or `Function` in live-game source.
+
+### Remaining gaps
+
+- GAP-MATE-004b (general one-sided algorithm) and GAP-MATE-001 (product policy for `UNKNOWN`) stay open.
+- LIVE-OFFER-001 to 006 await owner review. LIVE-OFFER-006 needs a product decision on repeated offers. (*All resolved at the Batch 7 closure below.*)
+- Abort, abandonment, reconnect, lease replacement, persistence, the outbox, and transport are not built.
+
+## PHASE 1 / BATCH 7 CLOSURE — LIVE-OFFER-006 RESOLVED
+
+Batch 7 passed review. The owner approved the repeated-offer policy: **one draw offer per committed move**.
+
+- **State:** `ActiveGameState.lastDrawOfferMove: number | null`, the committed move count (`history.length - 1`) that the last accepted offer was based on. `createActiveGame` sets `null`. Only an accepted offer writes it. A decline, a move, a claim, or a stop never resets it; a later move simply makes the count differ. It is derived from committed moves, not from `sequence`, which non-move commands also advance. No offer history is kept.
+- **Rule:** after the timing check, an offer whose move count equals `lastDrawOfferMove` is `InvalidState` with detail `draw_offer_already_used_for_move`, bound like the other offer rejections. There is no time cooldown, quota, or timer.
+- **Tests:**
+  - TST-LIVE-176: offer, decline, then an immediate repeat is rejected, and the marker survives;
+  - TST-LIVE-177: after the recipient's move, only the new last mover may offer;
+  - TST-LIVE-178: the original offerer may offer again after another move of their own, and that offer can be accepted;
+  - TST-LIVE-179: the original offer still replays after the decline, and acceptance and terminal behaviour are unchanged;
+  - TST-LIVE-158 was updated to the new policy: the re-offer now follows two moves, with `offer_id` 7 instead of 5;
+  - the property test TST-LIVE-180 now also checks that only an offer changes the marker, that an offer is never accepted twice on the same move count, and that the new rejection is reached.
+- **Mutation check:** disabling the marker check fails TST-LIVE-176 and TST-LIVE-180 (reverted).
+- **Documents:**
+  - `CONTRACT_CATALOG_V1.md` 10.2, a later-approved policy paragraph;
+  - `PHASE_0_DECISION_CHANGELOG.md` section 16, LIVE-OFFER-006 RESOLVED with the old wording kept as superseded;
+  - the v6 status.
+  Traceability is unchanged: the policy is not material to any row's status.
+- **Gates:** see the Batch 7 commit record in the Batch 8 section.

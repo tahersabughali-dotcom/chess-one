@@ -22,8 +22,9 @@ export type DrawRuleDetail =
  * Only outcomes that reviewed rules decide unambiguously. A time or
  * resignation result exists only when the opponent's one-sided mating
  * capability is proven (LIVE-CONTRACT-001): a win when it can mate, a draw
- * (`timeout_no_mate`, `resign_no_mate_possible`) when it cannot. There is no
- * result for agreement or abandonment yet. Coexisting draw facts are all
+ * (`timeout_no_mate`, `resign_no_mate_possible`) when it cannot. An accepted
+ * draw offer is `draw_agreed`, which has no draw-rule detail (section 5).
+ * There is no result for abandonment yet. Coexisting draw facts are all
  * retained in listing order because no rule picks one detail.
  */
 export type GameResult =
@@ -36,7 +37,13 @@ export type GameResult =
       readonly resultCode: "draw";
       readonly terminationReason: "draw_rule";
       readonly drawRuleDetails: readonly DrawRuleDetail[];
-    };
+    }
+  | { readonly resultCode: "draw"; readonly terminationReason: "draw_agreed" };
+
+export const DRAW_AGREED: GameResult = Object.freeze({
+  resultCode: "draw",
+  terminationReason: "draw_agreed",
+});
 
 /** A rule fact about a position reached by a committed move. */
 export type PositionFact =

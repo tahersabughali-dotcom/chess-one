@@ -18,10 +18,14 @@ import {
   isPlayerId,
   type LiveGameCommand,
   type MonotonicMs,
+  OFFER_DRAW_COMMAND_V1,
+  type OfferDrawCommandV1,
   type PlayerId,
   processCommand,
   RESIGN_GAME_COMMAND_V1,
+  RESPOND_DRAW_OFFER_COMMAND_V1,
   type ResignGameCommandV1,
+  type RespondDrawOfferCommandV1,
   type Seat,
   SUBMIT_MOVE_COMMAND_V1,
   type SubmitMoveCommandV1,
@@ -183,6 +187,43 @@ export function resignCommand(
   };
 }
 
+/** A well-formed draw offer by `seat`. */
+export function offerCommand(
+  state: ActiveGameState,
+  seat: Seat,
+  fields: Partial<OfferDrawCommandV1> = {},
+): OfferDrawCommandV1 {
+  return {
+    command: OFFER_DRAW_COMMAND_V1,
+    contractVersion: "1",
+    gameId: state.gameId,
+    clientCommandId: `${seat}-${state.sequence}-offer`,
+    controlLeaseId: state.controlLeases[seat],
+    expectedGameSequence: state.sequence,
+    ...fields,
+  };
+}
+
+/** A well-formed response by `seat` to the pending offer (offer id 0 when none is pending). */
+export function respondCommand(
+  state: ActiveGameState,
+  seat: Seat,
+  decision: string,
+  fields: Partial<RespondDrawOfferCommandV1> = {},
+): RespondDrawOfferCommandV1 {
+  return {
+    command: RESPOND_DRAW_OFFER_COMMAND_V1,
+    contractVersion: "1",
+    gameId: state.gameId,
+    clientCommandId: `${seat}-${state.sequence}-respond-${decision}`,
+    controlLeaseId: state.controlLeases[seat],
+    expectedGameSequence: state.sequence,
+    offerId: state.pendingDrawOffer?.createdAtSequence ?? 0,
+    decision,
+    ...fields,
+  };
+}
+
 /** Submits `command` as `seat` (default: the side to move) received at `time`. */
 export function submit(
   state: ActiveGameState,
@@ -234,6 +275,8 @@ export function snapshot(state: ActiveGameState): unknown {
       remainingMs: { ...state.clock.remainingMs },
     },
     status: JSON.parse(JSON.stringify(state.status)),
+    pendingDrawOffer: state.pendingDrawOffer === null ? null : { ...state.pendingDrawOffer },
+    lastDrawOfferMove: state.lastDrawOfferMove,
     commandBindings: state.commandBindings.map((binding) => ({
       seat: binding.seat,
       clientCommandId: binding.clientCommandId,

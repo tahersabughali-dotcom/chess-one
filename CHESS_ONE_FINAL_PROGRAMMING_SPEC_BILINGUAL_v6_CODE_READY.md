@@ -14,7 +14,10 @@
 - Toolchain maintenance (Node 24.21.0 LTS, pnpm 12.7.0) was reviewed, passed, and committed locally. / صيانة الأدوات روجعت ونجحت وحُفظت محليًا.
 - ENV-NODE-001 is resolved: the active runtime is Node 24.21.0 with pnpm 12.7.0. / ENV-NODE-001 محلول.
 - Batch 5 with corrections 5.1 and 5.2 (authoritative live game foundation, in memory, no transport or database) was reviewed, approved, and committed locally. / الدفعة 5 وتصحيحاتها روجعت واعتُمدت وحُفظت محليًا.
-- Batch 6 (one-sided mating capability, timeout and resignation adjudication) with correction 6.1 is implemented, uncommitted, and awaiting review. Batch 7 is NOT authorized. / الدفعة 6 منفّذة وغير محفوظة وتنتظر المراجعة، والدفعة 7 غير مأذونة.
+- Batch 6 (one-sided mating capability, timeout and resignation adjudication) with correction 6.1 was reviewed, passed, and committed locally. / الدفعة 6 والتصحيح 6.1 روجعا ونجحا وحُفظا محليًا.
+- Batch 7 (draw-offer state machine, live-game core completion) was reviewed and passed; with LIVE-OFFER-006 resolved (one draw offer per committed move) it is committed locally. / الدفعة 7 روجعت ونجحت، ومع حسم LIVE-OFFER-006 حُفظت محليًا.
+- Batch 8 (persistence foundation) is authorized. Batch 9 is NOT authorized. / الدفعة 8 مأذونة، والدفعة 9 غير مأذونة.
+- GAP-MATE-004b remains open. / الفجوة GAP-MATE-004b ما زالت مفتوحة.
 - v5 remains historical and unchanged. / v5 تاريخي ولا يُعدَّل.
 - All open gates remain binding. / كل البوابات المفتوحة ما زالت ملزمة.
 - Progress is recorded in `PHASE_1_IMPLEMENTATION_LOG.md`. / التقدم مسجل في سجل تنفيذ المرحلة 1.
