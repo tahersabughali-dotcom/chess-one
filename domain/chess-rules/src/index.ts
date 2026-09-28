@@ -1,7 +1,17 @@
 export { type FenError, type FenErrorCode, formatFen, parseFen } from "./fen.ts";
 export { createInitialPosition } from "./initial-position.ts";
 export { assessMatingPossibility, type MatingPossibility } from "./mating-possibility.ts";
-export { type Board, type CastlingRights, type Position, pieceAt } from "./position.ts";
+export {
+  type Board,
+  type CastlingRights,
+  createPosition,
+  isCanonicalPosition,
+  type Position,
+  type PositionFields,
+  type PositionInvariantCode,
+  type PositionInvariantError,
+  pieceAt,
+} from "./position.ts";
 export { type ConsistencyIssue, checkPositionConsistency } from "./position-consistency.ts";
 export {
   DEFAULT_RULESET_ID,

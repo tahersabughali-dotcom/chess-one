@@ -195,3 +195,87 @@ The test-only `tests/rules/support/attack-oracle.ts` and `knight-replay.ts` vali
 npx --yes pnpm@12.6.0 install
 npx --yes pnpm@12.6.0 run check
 ```
+
+## Batch 1.1: pre-Batch-2 foundation hardening
+
+Batch 2 is not authorized. This batch adds no rule behavior: no move generation, attack detection, check logic, legality, SAN, perft, clocks, server, UI, database, or API.
+
+### Git
+
+- Local git initialized in `d:\chess-one` on branch `main`. There is no remote; nothing was pushed or published, and git config was not modified.
+- `.gitignore` now also ignores `CHESS_ONE_*_REVIEW_BUNDLE.zip`.
+- Baseline commit `ff701c2`, "chore: preserve phase 1 batch 1 baseline", holds the reviewed Batch 1 state plus that ignore line. The review ZIP is not tracked.
+- Batch 1.1 changes are left uncommitted for review.
+
+### Position invariant
+
+- `Position` is now a class with an ES private field, exported as a type only. The private field makes the type nominal: object literals and spread copies fail typecheck with "Property '#canonical' is missing". There are no casts and no unsafe constructor.
+- A `Position` can only come from `parseFen`, `createInitialPosition`, or `createPosition(fields)`. The last one is a public validating factory that returns `Result<Position, PositionInvariantError>`.
+- `createPosition` checks:
+  - 64 cells;
+  - each cell empty or a valid piece, rebuilt with `createPiece`;
+  - exactly one king per colour;
+  - side to move is white or black;
+  - castling is four booleans;
+  - en passant is null or on rank 3 or 6;
+  - halfmove is a safe integer of at least 0;
+  - fullmove is a safe integer of at least 1.
+
+  It copies and freezes the object, the board, and castling. Canonical does not mean legal or reachable (Article 3.10.3).
+- `isCanonicalPosition(value)` is the runtime check, done with `#canonical in value`.
+- The board type stays a readonly array, not a 64-element tuple. Length 64 is proven at the creation boundary. `pieceAt` throws if a cell is missing instead of reading it as empty. `formatFen` iterates rank slices, so it no longer uses `?? null`.
+- `parseFen` keeps the syntax checks. It delegates the king count and counter ranges to `createPosition`, and the error codes are unchanged for every existing invalid-FEN fixture.
+- `assessMatingPossibility` accepts only a canonical `Position`. Its king-count branch was removed because the type guarantees it. `PROVEN_DEAD` is not widened, DEC-064 is unchanged, and GAP-MATE-001 through 004 are still open.
+- The test helper `tests/rules/support/knight-replay.ts` builds its next state as plain fields and converts them through `createPosition`. No deep import is used and no production type was weakened.
+
+### Boundary checker
+
+Regression tests were written first and run against the old checker:
+
+- 015: `Date["now"]()`, `Math["random"]()`, an aliased `Math`, and `process["env"]`.
+- 016: `` `${await import("node:fs")}` ``, `` `${require("node:fs")}` ``, and ``import(`node:fs`)``.
+- 017: aliased `require`, `module.require`, an aliased `eval`, and `(0, eval)`.
+- 018: `eval`, `new Function`, `Function()`, `(() => 0).constructor(...)`, and `[]["constructor"]["constructor"]`.
+
+The old checker missed 15 of these 16 cases entirely. It reported ``import(`node:fs`)`` only as a non-literal import. Tests 015–018 failed and test 019 (no false positives) passed.
+
+The regex lexer `tooling/boundaries/source-scan.ts` was deleted. `tooling/boundaries/syntax.ts` now parses every source file in one session through the pinned TypeScript 7.0.2 API (`typescript/unstable/sync`) with a virtual file system. It returns AST facts:
+
+- imports;
+- non-literal dynamic imports;
+- free identifier references;
+- member names;
+- `import.meta`.
+
+Comments, strings, template text, and regex literals cannot produce facts. `rules.ts` evaluates those facts:
+
+- Any reference to an ambient global is `ambient_access`. That covers `require`, `module`, `exports`, `process`, `globalThis`, `global`, `window`, `self`, `Date`, `performance`, `fetch`, the timers, `queueMicrotask`, `crypto`, `Buffer`, and `console`. Aliases and computed members are covered too.
+- `Math` is allowed only as a direct `Math.<name>` read other than `random`.
+- `eval`, `Function`, and any `.constructor` or `["constructor"]` read are `dynamic_code`.
+
+After the change all 19 boundary tests pass and the repository scan is clean.
+
+Size. Before: `rules.ts` 286 lines (256 non-blank) and `source-scan.ts` 105 lines (98 non-blank), 391 in total. After: `rules.ts` 320 lines (287 non-blank) and `syntax.ts` 146 lines (134 non-blank), 466 in total.
+
+The growth is mostly the ambient-global list, one name per line, and typed fact interfaces. The removed code was heuristic lexing, such as regex-versus-division guessing and string blanking, which is where the bypasses lived.
+
+Residual limits. This is an architecture guard, not a sandbox. A computed key built at runtime, such as `x["con" + "structor"]`, is not resolved. Domain tsconfigs still exclude Node and DOM types, so `require`, `process`, `Buffer`, and timers also fail typecheck. The API is marked unstable upstream; TypeScript is pinned exactly and the tests would fail on an API break.
+
+### Environment
+
+- ENV-NODE-001 (open): local Node 24.14.1 is below the reviewed Node 24.21.0 LTS baseline. No version manager is installed, and the system Node was not changed.
+- Direct dependencies added: 0. `package.json`, the workspace manifests, and `pnpm-lock.yaml` are unchanged. The audit found no known vulnerabilities.
+
+### Tests and gates
+
+- 12 files: 163 passed, 0 failed, 0 skipped, and 46 todo. The todo entries are only the NOT_IMPLEMENTED ledger rows.
+- New files: `tests/rules/position.test.ts` (TST-FOUND-POSITION-001–009) and boundary tests TST-BOUNDARY-015–019.
+- TST-FOUND-POSITION-009 holds compile-time assertions (`IsAssignable<…, Position>` constants typed `false`), so a structurally forgeable `Position` fails typecheck. It uses no ts-ignore or ts-expect-error. A temporary probe confirmed that literal and spread forgeries, and flipped assertions, are compile errors.
+- typecheck, lint (0 warnings), format:check, check:boundaries (43 files), test, and check all pass.
+- Three test lines carry `biome-ignore lint/suspicious/noTemplateCurlyInString`, because those strings are source code under test.
+
+### Remaining gaps
+
+- Every Batch 1 rule gap remains: no move generation, legality, check detection, SAN, or perft; GAP-MATE-001 through 004 are open; and consistency does not detect a side not to move being in check.
+- ENV-NODE-001 is open until the owner authorizes a Node update.
+- The boundary checker depends on an upstream-unstable TypeScript API. Any TypeScript upgrade must re-run TST-BOUNDARY-001–019.

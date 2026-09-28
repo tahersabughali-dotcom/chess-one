@@ -9,7 +9,13 @@ import {
   type Result,
   type Square,
 } from "@chess-one/game-values";
-import { type Board, type CastlingRights, freezePosition, type Position } from "./position.ts";
+import {
+  type Board,
+  type CastlingRights,
+  createPosition,
+  type Position,
+  type PositionInvariantCode,
+} from "./position.ts";
 
 export type FenErrorCode =
   | "input_length"
@@ -18,12 +24,12 @@ export type FenErrorCode =
   | "unknown_symbol"
   | "rank_syntax"
   | "rank_width"
-  | "king_count"
   | "side_to_move"
   | "castling_syntax"
   | "en_passant_syntax"
   | "halfmove_clock"
-  | "fullmove_number";
+  | "fullmove_number"
+  | PositionInvariantCode;
 
 export interface FenError {
   readonly code: FenErrorCode;
@@ -104,12 +110,6 @@ function parsePlacement(text: string): Result<Board, FenError> {
       board[file + 8 * (rankNumber - 1)] = cell;
     }
   }
-  for (const color of ["white", "black"] as const) {
-    const kings = board.filter((cell) => cell?.kind === "king" && cell.color === color).length;
-    if (kings !== 1) {
-      return fenError("king_count", `Placement has ${kings} ${color} kings instead of 1.`);
-    }
-  }
   return ok(board);
 }
 
@@ -136,16 +136,15 @@ function parseEnPassant(text: string): { readonly target: Square | null } | unde
   return target === undefined ? undefined : { target };
 }
 
-function parseCounter(text: string, minimum: number): number | undefined {
-  if (!COUNTER_SYNTAX.test(text)) return undefined;
-  const value = Number(text);
-  return Number.isSafeInteger(value) && value >= minimum ? value : undefined;
+function parseCounter(text: string): number | undefined {
+  return COUNTER_SYNTAX.test(text) ? Number(text) : undefined;
 }
 
 /**
- * Structural FEN parsing only. A successful parse does not mean the position is
- * legal or reachable (Article 3.10.3); see `checkPositionConsistency` for the
- * separate basic consistency checks.
+ * Structural FEN parsing only; king count and counter ranges are enforced by
+ * `createPosition`. A successful parse does not mean the position is legal or
+ * reachable (Article 3.10.3); see `checkPositionConsistency` for the separate
+ * basic consistency checks.
  */
 export function parseFen(text: string): Result<Position, FenError> {
   if (text.length > MAX_FEN_LENGTH) {
@@ -176,26 +175,24 @@ export function parseFen(text: string): Result<Position, FenError> {
     return fenError("en_passant_syntax", `En passant field "${epText}" is malformed.`);
   }
 
-  const halfmoveClock = parseCounter(half, 0);
+  const halfmoveClock = parseCounter(half);
   if (halfmoveClock === undefined) {
     return fenError("halfmove_clock", `Halfmove clock "${half}" is not a non-negative integer.`);
   }
 
-  const fullmoveNumber = parseCounter(full, 1);
+  const fullmoveNumber = parseCounter(full);
   if (fullmoveNumber === undefined) {
     return fenError("fullmove_number", `Fullmove number "${full}" is not a positive integer.`);
   }
 
-  return ok(
-    freezePosition({
-      board: board.value,
-      sideToMove,
-      castling,
-      enPassantTarget: enPassant.target,
-      halfmoveClock,
-      fullmoveNumber,
-    }),
-  );
+  return createPosition({
+    board: board.value,
+    sideToMove,
+    castling,
+    enPassantTarget: enPassant.target,
+    halfmoveClock,
+    fullmoveNumber,
+  });
 }
 
 function formatSymbol(piece: Piece): string {
@@ -208,8 +205,7 @@ function formatPlacement(board: Board): string {
   for (let rank = 7; rank >= 0; rank -= 1) {
     let text = "";
     let empty = 0;
-    for (let file = 0; file < 8; file += 1) {
-      const cell = board[file + 8 * rank] ?? null;
+    for (const cell of board.slice(8 * rank, 8 * rank + 8)) {
       if (cell === null) {
         empty += 1;
         continue;

@@ -5,4 +5,4 @@ dist/
 .env
 .env.*
 !.env.example
-CHESS_ONE_*_REVIEW_BUNDLE.zip
+CHESS_ONE_*_REVIEW*.zip

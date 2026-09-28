@@ -175,4 +175,64 @@ describe("TST-BOUNDARY dependency boundaries", () => {
     ].join("\n");
     expect(rulesFor(gv("a.ts", code), gv("b.ts", "export const y = 1;"))).toEqual([]);
   });
+
+  it("TST-BOUNDARY-015 computed or aliased member access cannot hide ambient access", () => {
+    for (const code of [
+      'const t = Date["now"]();',
+      'const r = Math["random"]();',
+      "const m = Math;\nconst r = m.random();",
+      'const e = process["env"];',
+    ]) {
+      expect(rulesFor(gv("a.ts", code)), code).toContain("ambient_access");
+    }
+  });
+
+  it("TST-BOUNDARY-016 imports inside template interpolations and template specifiers are found", () => {
+    for (const code of [
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: source text under test
+      'const s = `${await import("node:fs")}`;',
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: source text under test
+      'const s = `${require("node:fs")}`;',
+      "const m = await import(`node:fs`);",
+    ]) {
+      expect(rulesFor(cr("a.ts", code)), code).toContain("forbidden_import");
+    }
+  });
+
+  it("TST-BOUNDARY-017 aliased or indirect loaders and evaluation are rejected", () => {
+    for (const [code, rule] of [
+      ['const r = require;\nr("node:fs");', "ambient_access"],
+      ['const load = module.require;\nload("node:fs");', "ambient_access"],
+      ['const e = eval;\ne("1");', "dynamic_code"],
+      ['(0, eval)("1");', "dynamic_code"],
+    ] as const) {
+      expect(rulesFor(gv("a.ts", code)), code).toContain(rule);
+    }
+  });
+
+  it("TST-BOUNDARY-018 eval and the Function constructor are rejected in domain code", () => {
+    for (const code of [
+      'eval("1");',
+      'const f = new Function("return 1");',
+      'const v = Function("return 1")();',
+      'const v = (() => 0).constructor("return 1")();',
+      'const v = []["constructor"]["constructor"]("return 1")();',
+    ]) {
+      expect(rulesFor(gv("a.ts", code)), code).toContain("dynamic_code");
+    }
+  });
+
+  it("TST-BOUNDARY-019 strings, comments, regex literals, and property names are not code", () => {
+    const code = [
+      "const s = \"eval(x) Date.now() require('node:fs')\";",
+      '// const m = await import("node:fs");',
+      "/* new Function() process.env */",
+      'const r = /import\\("node:fs"\\)|Date\\.now\\(\\)/;',
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: source text under test
+      "const t = `eval ${s.length} Date.now()`;",
+      "const o = { eval: 1, Date: 2, constructorName: 3 };",
+      "const v = o.eval + o.Date + Math.abs(-1);",
+    ].join("\n");
+    expect(rulesFor(gv("a.ts", code))).toEqual([]);
+  });
 });

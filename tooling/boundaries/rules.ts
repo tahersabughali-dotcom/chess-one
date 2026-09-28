@@ -1,4 +1,4 @@
-import { scanSource } from "./source-scan.ts";
+import { analyzeSources, type SourceFacts } from "./syntax.ts";
 
 export interface SourceFile {
   /** Repository-relative path with forward slashes. */
@@ -54,21 +54,39 @@ const LICENSE_GATED_PACKAGES = [
   "python-chess",
 ];
 
-/** Ambient I/O, time, randomness, and environment access that domain code must not touch. */
-const AMBIENT_ACCESS: readonly [RegExp, string][] = [
-  [/\bprocess\s*\./, "process"],
-  [/\bDate\s*\.\s*now\b/, "Date.now"],
-  [/\bnew\s+Date\b/, "new Date"],
-  [/\bperformance\s*\./, "performance"],
-  [/\bMath\s*\.\s*random\b/, "Math.random"],
-  [/\bfetch\s*\(/, "fetch"],
-  [/\b(?:setTimeout|setInterval|setImmediate)\s*\(/, "timer"],
-  [/\bconsole\s*\./, "console"],
-  [/\bglobalThis\b/, "globalThis"],
-  [/\bimport\s*\.\s*meta\b/, "import.meta"],
-  [/\bcrypto\s*\./, "crypto"],
-  [/\bBuffer\b/, "Buffer"],
-];
+/**
+ * Globals that give domain code I/O, time, environment, or module loading. Any
+ * reference is rejected, so aliases and computed members are covered too.
+ */
+const AMBIENT_GLOBALS = new Set([
+  "require",
+  "module",
+  "exports",
+  "process",
+  "globalThis",
+  "global",
+  "window",
+  "self",
+  "Date",
+  "performance",
+  "fetch",
+  "setTimeout",
+  "setInterval",
+  "setImmediate",
+  "queueMicrotask",
+  "crypto",
+  "Buffer",
+  "console",
+]);
+
+/** Code evaluation; `.constructor` reaches the Function constructor from any function. */
+const DYNAMIC_CODE_GLOBALS = new Set(["eval", "Function"]);
+const DYNAMIC_CODE_MEMBERS = new Set(["constructor"]);
+
+/** `Math` is pure except `random`; only direct `Math.<name>` reads are allowed. */
+function isImpureMath(member: string | undefined): boolean {
+  return member === undefined || member === "random";
+}
 
 export const SOURCE_EXTENSIONS = [".ts", ".mts", ".cts", ".tsx", ".js", ".mjs", ".cjs", ".jsx"];
 
@@ -111,8 +129,28 @@ function domainPolicyFor(path: string): DomainPolicy | undefined {
   return DOMAIN_POLICIES.find((policy) => path.startsWith(policy.srcRoot));
 }
 
-function checkImports(file: SourceFile, violations: Violation[]): void {
-  const scan = scanSource(file.content);
+function checkDomainCode(file: SourceFile, scan: SourceFacts, violations: Violation[]): void {
+  const add = (rule: string, line: number, detail: string): void => {
+    violations.push({ rule, path: file.path, line, detail });
+  };
+  for (const { name, line, member } of scan.identifiers) {
+    if (AMBIENT_GLOBALS.has(name) || (name === "Math" && isImpureMath(member))) {
+      add("ambient_access", line, `${name} is not allowed in domain code`);
+    } else if (DYNAMIC_CODE_GLOBALS.has(name)) {
+      add("dynamic_code", line, `${name} evaluates code`);
+    }
+  }
+  for (const { specifier, line } of scan.memberNames) {
+    if (DYNAMIC_CODE_MEMBERS.has(specifier)) {
+      add("dynamic_code", line, `.${specifier} can reach the Function constructor`);
+    }
+  }
+  for (const line of scan.importMetaLines) {
+    add("ambient_access", line, "import.meta is not allowed in domain code");
+  }
+}
+
+function checkImports(file: SourceFile, scan: SourceFacts, violations: Violation[]): void {
   const policy = domainPolicyFor(file.path);
   const isProduction = PRODUCTION_ROOTS.some((root) => file.path.startsWith(root));
   const isContract = file.path.startsWith("contracts/");
@@ -174,16 +212,7 @@ function checkImports(file: SourceFile, violations: Violation[]): void {
     }
   }
 
-  if (policy !== undefined) {
-    const lines = scan.code.split("\n");
-    for (const [index, text] of lines.entries()) {
-      for (const [pattern, label] of AMBIENT_ACCESS) {
-        if (pattern.test(text)) {
-          add("ambient_access", index + 1, `${label} is not allowed in domain code`);
-        }
-      }
-    }
-  }
+  if (policy !== undefined) checkDomainCode(file, scan, violations);
 }
 
 function objectKeys(value: unknown): string[] {
@@ -251,14 +280,14 @@ function checkManifest(file: SourceFile, violations: Violation[]): void {
   }
 }
 
-function checkCycles(files: readonly SourceFile[], violations: Violation[]): void {
+function checkCycles(facts: ReadonlyMap<string, SourceFacts>, violations: Violation[]): void {
   const graph = new Map<string, string[]>();
-  for (const file of files) {
-    if (!isSource(file.path) || domainPolicyFor(file.path) === undefined) continue;
-    const edges = scanSource(file.content)
-      .imports.filter(({ specifier }) => isRelative(specifier))
-      .map(({ specifier }) => resolveRelative(file.path, specifier));
-    graph.set(file.path, edges);
+  for (const [path, scan] of facts) {
+    if (domainPolicyFor(path) === undefined) continue;
+    const edges = scan.imports
+      .filter(({ specifier }) => isRelative(specifier))
+      .map(({ specifier }) => resolveRelative(path, specifier));
+    graph.set(path, edges);
   }
   const state = new Map<string, "visiting" | "done">();
   const visit = (node: string, trail: readonly string[]): void => {
@@ -277,10 +306,15 @@ function checkCycles(files: readonly SourceFile[], violations: Violation[]): voi
 
 export function findBoundaryViolations(files: readonly SourceFile[]): readonly Violation[] {
   const violations: Violation[] = [];
+  const sources = files.filter((file) => isSource(file.path));
+  const facts = analyzeSources(sources);
   for (const file of files) {
     if (file.path.endsWith("package.json")) checkManifest(file, violations);
-    else if (isSource(file.path)) checkImports(file, violations);
   }
-  checkCycles(files, violations);
+  for (const file of sources) {
+    const scan = facts.get(file.path);
+    if (scan !== undefined) checkImports(file, scan, violations);
+  }
+  checkCycles(facts, violations);
   return violations;
 }

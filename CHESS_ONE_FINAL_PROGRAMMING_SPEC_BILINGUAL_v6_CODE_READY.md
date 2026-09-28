@@ -4,6 +4,14 @@
 **Status / الحالة:** PHASE 0.6 DOCUMENTATION BASELINE. Candidate A is an approved starting stack family. NO APPLICATION CODE in this batch. Phase 1 is not opened by this file.  
 **الحالة:** خط أساس المرحلة 0.6. عائلة المرشح A معتمدة للبداية. لا شيفرة تطبيق في هذه الدفعة. هذا الملف لا يفتح المرحلة 1.
 
+**CURRENT EXECUTION STATUS / حالة التنفيذ الحالية:** the status line above is historical for Phase 0.6.  
+- Phase 1 is opened for controlled, owner-authorized batches only. / المرحلة 1 مفتوحة لدفعات محكومة يأذن بها المالك فقط.
+- Phase 1 Batch 1 (foundation bootstrap) is completed. / الدفعة 1 مكتملة.
+- Batch 2 is NOT authorized until the Batch 1.1 hardening review passes. / الدفعة 2 غير مأذونة حتى تنجح مراجعة الدفعة 1.1.
+- v5 remains historical and unchanged. / v5 تاريخي ولا يُعدَّل.
+- All open gates remain binding. / كل البوابات المفتوحة ما زالت ملزمة.
+- Progress is recorded in `PHASE_1_IMPLEMENTATION_LOG.md`. / التقدم مسجل في سجل تنفيذ المرحلة 1.
+
 **Historical baseline / الخط التاريخي:** `CHESS_ONE_FINAL_PROGRAMMING_SPEC_BILINGUAL_v5_WEB_FIRST_HARDENED.md` يبقى كما أُغلق في المرحلة 0.5. لا يُعدَّل. عند تعارض v5 مع هذه المقدمة، هذه المقدمة هي العقد.
 
 **Supersedes as normative reading / يعلو في القراءة على:** conflicting statements inside the preserved v4 text appended below. The preserved text is kept so IDEA-001 through IDEA-342 and prior diagrams remain traceable. It is not deleted.

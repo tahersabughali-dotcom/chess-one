@@ -1,4 +1,4 @@
-import { formatFen, type Position, pieceAt } from "@chess-one/chess-rules";
+import { createPosition, formatFen, type Position, pieceAt } from "@chess-one/chess-rules";
 import { fileIndex, parseMoveIntent, rankIndex, squareIndex } from "@chess-one/game-values";
 import { checkersOf } from "./attack-oracle.ts";
 
@@ -24,14 +24,16 @@ export function applyQuietKnightMove(position: Position, uci: string): Position 
   const board = [...position.board];
   board[squareIndex(to)] = piece;
   board[squareIndex(from)] = null;
-  const next: Position = {
+  const created = createPosition({
     board,
     sideToMove: position.sideToMove === "white" ? "black" : "white",
     castling: position.castling,
     enPassantTarget: null,
     halfmoveClock: position.halfmoveClock + 1,
     fullmoveNumber: position.fullmoveNumber + (position.sideToMove === "black" ? 1 : 0),
-  };
+  });
+  if (!created.ok) throw new Error(`${uci}: ${created.error.message}`);
+  const next = created.value;
   if (checkersOf(next, position.sideToMove).length > 0)
     throw new Error(`${uci}: leaves own king in check`);
   if (checkersOf(next, next.sideToMove).length > 0) throw new Error(`${uci}: gives check`);
