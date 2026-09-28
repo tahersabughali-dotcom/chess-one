@@ -1,5 +1,5 @@
 /**
- * Status of every row in CHESS_RULES_GOLDEN_TEST_LEDGER_V1.md after Batch 3.
+ * Status of every row in CHESS_RULES_GOLDEN_TEST_LEDGER_V1.md after Batch 4.
  * IMPLEMENTED: the row's expected behaviour is asserted.
  * PARTIAL: part of the expected behaviour is asserted; `pending` says what is not.
  * NOT_IMPLEMENTED: no behaviour is asserted. `fixtureValidated` means its FEN or
@@ -10,7 +10,11 @@
  * mapping them to contract errors is a later layer. Likewise "Terminal
  * `white_win`, `checkmate`" and "Terminal draw, `stalemate`" are asserted as the
  * pure rule fact from `evaluateMoveExhaustion`; a durable GameResult is later
- * platform work. "Server SAN" is asserted as `toCanonicalSan` output. Every
+ * platform work. "Draw `threefold_claim`" and "Draw `fifty_move_claim`" are
+ * asserted as a correct `evaluateDrawClaim` assessment, and "Automatic draw
+ * `fivefold`" and "Draw `seventy_five_move`" as `evaluateAutomaticDraws` facts.
+ * Changing a clock or applying a move is Live Game work, so rows that expect it
+ * stay PARTIAL. "Server SAN" is asserted as `toCanonicalSan` output. Every
  * IMPLEMENTED or PARTIAL row must be named by an executable test
  * (ledger-status.test.ts).
  */
@@ -25,6 +29,7 @@ const notImplemented = (fixtureValidated = false): LedgerStatus => ({
 });
 
 const DRAW_RESULT_PENDING = "draw `dead_position` needs GameResult, which is not implemented";
+const LIVE_CLOCK = "adding the time to the opponent's clock";
 const implemented: LedgerStatus = { status: "IMPLEMENTED" };
 const partial = (pending: string): LedgerStatus => ({ status: "PARTIAL", pending });
 
@@ -61,19 +66,27 @@ export const LEDGER_STATUS: Readonly<Record<string, LedgerStatus>> = {
   "TST-RULE-E01-017a": notImplemented(),
   "TST-RULE-E01-017b": notImplemented(),
   "TST-RULE-E01-017c": notImplemented(),
-  "TST-RULE-E01-018": notImplemented(),
-  "TST-RULE-E01-018b": notImplemented(true),
-  "TST-RULE-E01-019": notImplemented(),
-  "TST-RULE-E01-020": notImplemented(),
-  "TST-RULE-E01-020b": notImplemented(true),
-  "TST-RULE-E01-020c": notImplemented(true),
-  "TST-RULE-E01-021a": notImplemented(),
-  "TST-RULE-E01-021b": notImplemented(true),
-  "TST-RULE-E01-022a": notImplemented(),
-  "TST-RULE-E01-022b": notImplemented(),
-  "TST-RULE-E01-022c": notImplemented(),
-  "TST-RULE-E01-023a": notImplemented(),
-  "TST-RULE-E01-023b": notImplemented(),
+  "TST-RULE-E01-018": implemented,
+  "TST-RULE-E01-018b": implemented,
+  "TST-RULE-E01-019": implemented,
+  "TST-RULE-E01-020": implemented,
+  "TST-RULE-E01-020b": implemented,
+  "TST-RULE-E01-020c": partial(
+    `the incorrect verdict, 120000 ms rule fact, and must_apply consequence are asserted; ${LIVE_CLOCK} and applying a7a6 are Live Game work`,
+  ),
+  "TST-RULE-E01-021a": implemented,
+  "TST-RULE-E01-021b": implemented,
+  "TST-RULE-E01-022a": partial(
+    `the incorrect verdict and 120000 ms rule fact are asserted; ${LIVE_CLOCK} is Live Game work`,
+  ),
+  "TST-RULE-E01-022b": partial(
+    `the incorrect verdict, 120000 ms rule fact, and must_apply consequence are asserted; ${LIVE_CLOCK} and applying e2e4 are Live Game work`,
+  ),
+  "TST-RULE-E01-022c": partial(
+    `the incorrect verdict, 120000 ms rule fact, and illegal (not applied) disposition are asserted; ${LIVE_CLOCK} is Live Game work`,
+  ),
+  "TST-RULE-E01-023a": implemented,
+  "TST-RULE-E01-023b": implemented,
   "TST-RULE-E01-024": notImplemented(),
   "TST-RULE-E01-025": notImplemented(),
   "TST-RULE-E01-026": notImplemented(),

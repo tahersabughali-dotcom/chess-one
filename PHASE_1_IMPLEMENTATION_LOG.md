@@ -542,3 +542,163 @@ A mutation check deliberately broke four things in turn, and each was caught:
 - No durable GameResult or game events; no draws, repetition, or 50/75-move rules; no resignation, timeout, or clocks; no PGN.
 - Dead-position detection is still partial (GAP-MATE-001 to 004), and 3.10.3 reachability is not proven.
 - ENV-NODE-001 is open.
+
+## Batch 4: repetition identity, draw claims, fivefold, and 50/75-move rules
+
+Batch 5 is not authorized. This batch builds no ClaimDrawCommand processing, clock, GameResult, `game.finished.v1`, draw agreement, resignation, timeout, server, UI, or database.
+
+### Baseline
+
+- **011b correction:** the independent Batch 3 review confirmed the TST-RULE-E01-011b correction. The ledger's expected SAN changed from `a8=Q` to `a8=Q#`, because the resulting position is checkmate.
+  - The fixture, the move, and the SAN rules are unchanged.
+  - 011b is now IMPLEMENTED, and the owner-decision note was removed.
+- `pnpm check` passed. Batch 3 and the correction were committed locally as `bcc0def` "feat: add canonical SAN and terminal rule facts". There is no remote and nothing was pushed.
+- The Batch 4 changes are uncommitted, for review.
+
+### Modules (domain/chess-rules/src)
+
+| File | Responsibility | Exports |
+|---|---|---|
+| `repetition.ts` (124 lines) | Article 9.2.3 identity and occurrence counting | `repetitionKey`, `RepetitionKey`, `samePositionForRepetition`, `repetitionCount`, `RuleHistoryError` |
+| `draw-rules.ts` (174 lines) | Claim assessment and automatic draw facts | `evaluateDrawClaim`, `evaluateAutomaticDraws`, `INCORRECT_CLAIM_BONUS_MS`, and the output types |
+
+### Repetition identity (Article 9.2.3)
+
+- `RepetitionKey` is an opaque, frozen class. It has a private constructor, so the only way to obtain one is `repetitionKey(position)`; a client string cannot become a key.
+- Its `text` is inspectable, unambiguous, space-delimited canonical text, so it is collision-free by construction:
+  - 64 board characters from a1 to h8;
+  - `w` or `b` for the side to move;
+  - four castling slots in the order `KQkq`, with `-` for a missing right;
+  - the effective en passant square (two characters), or `-`.
+- No SAN, FEN clocks, or hash are involved.
+- **En passant:** the target counts only if an actual legal en passant capture is available to the side to move. That is decided by the existing legal-move authority, `generateLegalMoves`, together with the existing `enPassantVictim` helper, so no new movement logic was added (corrected in Batch 4.1, below).
+  - A target that no pawn can reach does not count.
+  - A capture that is illegal because it would expose the king does not count.
+  - A king standing next to the target does not count.
+  - A normal pawn capture onto an occupied target square does not count.
+- **Castling:** the rights come from the canonical position, which legal transitions only ever clear. There is no second rights tracker.
+
+### History convention and trust boundary
+
+- A history is a readonly list of `RepetitionKey`s, one for every committed position:
+  - the initial position first;
+  - then one entry for each accepted move;
+  - ending with the current position.
+- An intended-claim evaluation never appends to it.
+- The evaluators require the last entry to match the current position; otherwise they return `history_not_current`.
+- The rules package evaluates the history it is given. It cannot prove that the caller is trustworthy. The Live Game authority owns the history and that trust boundary, and a client never submits history or a FEN as authority.
+- For the fifty-move rules, the state input is the canonical halfmove clock maintained by legal transitions.
+
+### Claims (Articles 9.2, 9.3, 9.5.2, 9.5.3)
+
+`evaluateDrawClaim(history, position, claim)` judges a claim by the side to move and returns a frozen assessment. The verdict is `correct`, or `incorrect` with `opponentBonusMs: 120000`.
+
+| Claim kind | Correct when |
+|---|---|
+| `threefold_current` | The current identity has occurred at least 3 times, counting the current one |
+| `fifty_move_current` | The halfmove clock is at least 100 |
+| `threefold_intended` | The intended move, applied hypothetically, creates the third or later occurrence |
+| `fifty_move_intended` | The intended move, applied hypothetically, takes the halfmove clock to at least 100 |
+
+For intended claims, the move is resolved through the same legal-move authority as `applyLegalMove`. The outcome for the intended move is one of:
+
+- `not_applied`: the claim is correct. The move proves the claim, and the game is drawn without playing it.
+- `must_apply`: the claim is incorrect and the move is legal. The resulting position is returned as evidence, and the Live Game authority must then play the move (9.5.3).
+- `illegal`: the move is illegal and must not be applied. The `LegalMoveError` is preserved.
+
+Every claim returns `evidence`: the judged position (the hypothetical one for intended claims) and its occurrence count. The only exception is an illegal intended move, where `evidence` is `null`.
+
+- Neither the position nor the history is mutated.
+- 120000 ms is a rule fact only. No clock exists, and it is not an abandonment threshold, increment, or lag allowance.
+- Network response codes are not part of this domain.
+
+### Automatic facts (Articles 9.6.1, 9.6.2)
+
+`evaluateAutomaticDraws(history, position)` returns the explicit facts `{ fivefold, seventyFiveMove }` without ranking them.
+
+- `fivefold` is true once the current identity has occurred at least 5 times.
+- `seventyFiveMove` is true once the halfmove clock is at least 150, unless `evaluateMoveExhaustion` reports checkmate, which takes precedence.
+- Threefold and 100 halfmoves are never automatic, and fivefold and 150 halfmoves never need a claim.
+- `evaluateMoveExhaustion` is reused, not merged. Event ordering and GameResult are later work.
+
+### Ledger status changes
+
+**Now IMPLEMENTED:**
+- 011b (the corrected SAN).
+- 018, 018b, 019, 020, 020b: pure claim and automatic facts.
+- 021a: a 150-ply quiet history built by legal moves.
+- 021b: mate on halfmove 150 suppresses the seventy-five-move fact.
+- 023a: KQkq versus KQk, reached by a legal rook excursion; a placement-only count would be 3, but the true count is 2, so the claim is incorrect.
+- 023b: histories with and without legal en passant, plus the unreachable-target and pinned-pawn regressions.
+
+**PARTIAL:**
+- 020c, 022a, 022b, 022c. The incorrect verdict, the 120000 ms fact, and the `must_apply` or `illegal` disposition are asserted.
+- Their ledger text also expects the opponent's clock to change and, for 020c and 022b, the move to be applied. That is Live Game work.
+- The ledger wording was not changed; it describes product behaviour.
+
+The ledger-status header now maps draw-claim and automatic-draw wording to these rule facts.
+
+### Tests
+
+- `repetition.test.ts`: TST-FOUND-REP-001–008, 023a, 023b. Covers the key format, clocks being ignored, side, placement, castling, legal en passant, counts that need not be consecutive, frozen keys, and the history convention.
+- `draw-rules.test.ts`: golden rows 018–022c and TST-FOUND-DRAW-001–004. Covers the history precondition, the thresholds 99/100/149/150 and 3/4/5, a preserved promotion error, and frozen results.
+- `repetition.property.test.ts`: TST-FOUND-REPPROP-001–003.
+  - Clocks never change the identity, and the side to move always does.
+  - An en passant target matters exactly when an oracle built from `generateLegalMoves` finds a legal pawn move onto it.
+  - Identity equality agrees with that oracle for every pair of positions along a playout.
+- `support/rule-history.ts` (test-only): builds histories through `applyLegalMove`, and walks 150 quiet moves with no pawn move, capture, or check.
+
+A mutation check deliberately broke four things in turn, and each was caught:
+
+| Injected bug | Failing tests |
+|---|---|
+| Raw en passant target used | 3 |
+| Pseudo-legal en passant used | 3 |
+| Mate suppression inverted | 1 (021b) |
+| Hypothetical position not counted | 2 (018b, 022b) |
+
+### Movement, SAN, and gates
+
+- Every perft vector is unchanged and passes, and every SAN test passes. Legal move generation was not modified.
+- 24 test files: 292 passed, 0 failed, 0 skipped, 16 todo. Todo fell from 29 because 13 NOT_IMPLEMENTED rows now have evidence.
+- Dependencies added: 0. No casts, ts-ignore, or ts-expect-error. The boundary rules are unchanged.
+- A doc comment first wrote out the ruleset id and broke TST-FOUND-RULESET-004 (single source of the id). It was reworded.
+
+### Self-review
+
+- **Raw en passant target, or a pinned pawn changing identity?** No. REP-005, 023b, and REPPROP-002 test this.
+- **Clocks inside the identity?** No.
+- **Castling represented twice?** No.
+- **Threefold or 50 automatic, or fivefold or 75 claim-only?** No. DRAW-002 tests this.
+- **Can a correct intended claim mutate state?** No. 018b and 020b test this.
+- **Does an incorrect legal claim expose `must_apply`?** Yes. 020c and 022b test this.
+- **Can an illegal intended move be applied?** No. 022c and DRAW-003 test this.
+- **Is 120000 ms applied to anything?** No, it is a fact only.
+- **Does checkmate beat 75?** Yes. 021b tests this.
+- **SAN used for identity, or a hash collision risk?** No.
+- **Perft or SAN changes?** None.
+- **Server behaviour added?** None.
+
+### Remaining gaps
+
+- No ClaimDrawCommand processing, clock application of 9.5.3, GameResult, events, draw agreement, resignation, timeout, or PGN.
+- If a claimed intended move would itself give checkmate, the claim is still judged only on repetition or the halfmove count. Live Game ordering must decide such cases.
+- Claims or facts on a position whose game has already ended are not guarded here; that is Live Game work.
+- Dead-position detection is still partial (GAP-MATE-001 to 004), and 3.10.3 reachability is not proven.
+- ENV-NODE-001 is open.
+
+### Batch 4.1: en passant identity review correction
+
+- **Finding:** the independent review of Batch 4 found that an occupied en passant target could enter the repetition identity. A canonical Position is structurally valid but not guaranteed to be reachable, so its raw target can name an occupied square.
+- **Failing regression first:** TST-FOUND-REP-009 was added before any production change and failed against the Batch 4 code, on `samePositionForRepetition`:
+  - `4k3/8/3b4/4P3/8/8/8/4K3 w - d6 0 1` against the same FEN with `-`;
+  - the black mirror `4k3/8/8/8/4p3/3B4/8/4K3 b - d3 0 1` against the same FEN with `-`.
+  - In both, the pawn capture onto the bishop is legal with and without the target, and clearing the target changes no legal move.
+- **Root cause:** `effectiveEnPassant` accepted any legal move by an adjacent own pawn onto the target. A normal capture onto an occupied target satisfied that.
+- **Fix:** the target is effective only if some move from `generateLegalMoves` goes to the target and `enPassantVictim` identifies it as en passant. `enPassantVictim` already returns nothing for an occupied destination. The pawn geometry was removed from `repetition.ts`, so it holds no en passant rules of its own. `move-generation.ts`, legal moves, transitions, and SAN are unchanged.
+- **Stronger property oracle:** REPPROP-002 and 003 no longer look for a pawn move onto the target. The oracle rebuilds the position with the target cleared and treats the target as effective exactly when the public legal move sets differ. It uses no internal en passant helper. The two regression FENs were added as playout starts.
+- **Mutation check:** with the `enPassantVictim` condition temporarily disabled, so that any legal move onto the target counted (the old blind spot), REP-009, REPPROP-002, and REPPROP-003 failed; fast-check shrank to the black regression start. The fix was then restored.
+- **Wording:** the key is now described as unambiguous, space-delimited canonical text rather than fixed-width, because the en passant field is `-` or two characters.
+- The Batch 4 thresholds, history convention, claim model, castling identity, and ledger statuses are unchanged. `repetition.ts` is now 122 lines.
+- **Gates:** 24 test files, 293 passed, 0 failed, 0 skipped, 16 todo. Perft and SAN are unchanged. Typecheck, lint, format, boundaries, check, and audit are recorded in the Batch 4.1 review bundle.
+- Dependencies added: 0. `package.json` and `pnpm-lock.yaml` are unchanged. Batch 4 and 4.1 remain uncommitted.
