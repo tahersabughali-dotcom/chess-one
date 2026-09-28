@@ -51,7 +51,7 @@ The earlier 008a FEN `5r2/8/8/8/8/8/8/R3K2R w KQ - 0 1` had no black king and wa
 | Test | Article | State | Action | Expected |
 |---|---|---|---|---|
 | TST-RULE-E01-011a | 3.7.3.3 | `8/P7/8/8/8/8/8/k1K5 w - - 0 1` | a7a8 with no promotion | InvalidState. No auto-queen |
-| TST-RULE-E01-011b | 3.7.3.3 | Same | a7a8 promotion q | Accepted. Server SAN `a8=Q` |
+| TST-RULE-E01-011b | 3.7.3.3 | Same | a7a8 promotion q | Accepted. Server SAN `a8=Q#`: the resulting position is checkmate |
 | TST-RULE-E01-011c | 3.7.3.3 | Same | a7a8 promotion n | Accepted. Server SAN `a8=N`. Underpromotion is legal |
 | TST-RULE-E01-011d | 3.7.3.3 | Initial | e2e4 promotion q | InvalidState. Promotion on a non-promotion move |
 

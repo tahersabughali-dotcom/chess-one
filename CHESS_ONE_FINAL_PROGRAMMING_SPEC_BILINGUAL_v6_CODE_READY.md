@@ -8,8 +8,9 @@
 - Phase 1 is opened for controlled, owner-authorized batches only. / المرحلة 1 مفتوحة لدفعات محكومة يأذن بها المالك فقط.
 - Phase 1 Batch 1 (foundation bootstrap) is completed. / الدفعة 1 مكتملة.
 - Batch 1.1 (foundation hardening) was independently reviewed and passed. / الدفعة 1.1 روجعت مراجعة مستقلة ونجحت.
-- Batch 2 (standard chess move-legality core) is authorized and in progress. / الدفعة 2 مأذونة وقيد التنفيذ.
-- Batch 3 is NOT authorized. / الدفعة 3 غير مأذونة.
+- Batch 2 (standard chess move-legality core) was independently reviewed, passed, and committed locally. / الدفعة 2 روجعت ونجحت وحُفظت محليًا.
+- Batch 3 (canonical SAN and checkmate/stalemate rule facts) is authorized and in progress. / الدفعة 3 مأذونة وقيد التنفيذ.
+- Batch 4 is NOT authorized. / الدفعة 4 غير مأذونة.
 - ENV-NODE-001 remains open: local Node is below the reviewed 24.21.0 LTS baseline. / ENV-NODE-001 ما زال مفتوحًا.
 - v5 remains historical and unchanged. / v5 تاريخي ولا يُعدَّل.
 - All open gates remain binding. / كل البوابات المفتوحة ما زالت ملزمة.

@@ -1,5 +1,5 @@
 /**
- * Status of every row in CHESS_RULES_GOLDEN_TEST_LEDGER_V1.md after Batch 2.
+ * Status of every row in CHESS_RULES_GOLDEN_TEST_LEDGER_V1.md after Batch 3.
  * IMPLEMENTED: the row's expected behaviour is asserted.
  * PARTIAL: part of the expected behaviour is asserted; `pending` says what is not.
  * NOT_IMPLEMENTED: no behaviour is asserted. `fixtureValidated` means its FEN or
@@ -7,8 +7,12 @@
  *
  * The ledger's IllegalMove and InvalidState are asserted as the pure-domain
  * errors `illegal_move`, `promotion_required`, and `promotion_unexpected`;
- * mapping them to contract errors is a later layer. Every IMPLEMENTED or
- * PARTIAL row must be named by an executable test (ledger-status.test.ts).
+ * mapping them to contract errors is a later layer. Likewise "Terminal
+ * `white_win`, `checkmate`" and "Terminal draw, `stalemate`" are asserted as the
+ * pure rule fact from `evaluateMoveExhaustion`; a durable GameResult is later
+ * platform work. "Server SAN" is asserted as `toCanonicalSan` output. Every
+ * IMPLEMENTED or PARTIAL row must be named by an executable test
+ * (ledger-status.test.ts).
  */
 export type LedgerStatus =
   | { readonly status: "IMPLEMENTED" }
@@ -21,14 +25,11 @@ const notImplemented = (fixtureValidated = false): LedgerStatus => ({
 });
 
 const DRAW_RESULT_PENDING = "draw `dead_position` needs GameResult, which is not implemented";
-const SAN_PENDING = "server SAN is not implemented";
 const implemented: LedgerStatus = { status: "IMPLEMENTED" };
 const partial = (pending: string): LedgerStatus => ({ status: "PARTIAL", pending });
 
 export const LEDGER_STATUS: Readonly<Record<string, LedgerStatus>> = {
-  "TST-RULE-E01-001": partial(
-    `${SAN_PENDING}; game sequence +1 and terminal status need the game layer`,
-  ),
+  "TST-RULE-E01-001": partial("game sequence +1 is game-layer command semantics"),
   "TST-RULE-E01-002": implemented,
   "TST-RULE-E01-003": implemented,
   "TST-RULE-E01-004": implemented,
@@ -36,15 +37,15 @@ export const LEDGER_STATUS: Readonly<Record<string, LedgerStatus>> = {
   "TST-RULE-E01-006": implemented,
   "TST-RULE-E01-007": implemented,
   "TST-RULE-E01-008a": implemented,
-  "TST-RULE-E01-008b": partial(`${SAN_PENDING} (O-O-O)`),
-  "TST-RULE-E01-009": partial(`${SAN_PENDING} (en passant capture)`),
+  "TST-RULE-E01-008b": implemented,
+  "TST-RULE-E01-009": implemented,
   "TST-RULE-E01-010": implemented,
   "TST-RULE-E01-011a": implemented,
-  "TST-RULE-E01-011b": partial(`${SAN_PENDING} (a8=Q)`),
-  "TST-RULE-E01-011c": partial(`${SAN_PENDING} (a8=N)`),
+  "TST-RULE-E01-011b": implemented,
+  "TST-RULE-E01-011c": implemented,
   "TST-RULE-E01-011d": implemented,
-  "TST-RULE-E01-012": partial("terminal `white_win` by `checkmate` needs GameResult"),
-  "TST-RULE-E01-013": partial("terminal draw by `stalemate` needs GameResult"),
+  "TST-RULE-E01-012": implemented,
+  "TST-RULE-E01-013": implemented,
   "TST-RULE-E01-014a": partial(DRAW_RESULT_PENDING),
   "TST-RULE-E01-014b": partial(DRAW_RESULT_PENDING),
   "TST-RULE-E01-014c": partial(DRAW_RESULT_PENDING),

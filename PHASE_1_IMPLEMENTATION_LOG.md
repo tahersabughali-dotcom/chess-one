@@ -417,3 +417,128 @@ No bitboards.
 - Consistency does not check that the en passant target matches a real double push beyond the existing checks.
 - GAP-MATE-001 through 004 are open, and dead-position detection is not expanded.
 - ENV-NODE-001 is open. Node must be resolved before server or web work.
+
+## Batch 3: canonical SAN and checkmate/stalemate rule facts
+
+Batch 4 is not authorized. This batch builds no SAN parser, PGN, durable GameResult, game events, clocks, draws, repetition, 50/75-move rules, resignation, timeout, dead-position completion, server, UI, or database.
+
+### Baseline
+
+- Before Batch 3, `pnpm check` passed. The 19 working files were byte-identical to the reviewed Batch 2 ZIP.
+- The reviewed Batch 2 was committed locally as `86c3ce0` "feat: implement standard chess move legality core". There is no remote and nothing was pushed. `package.json` and `pnpm-lock.yaml` are unchanged, and the review ZIPs stay ignored.
+- The Batch 3 changes are uncommitted, for review.
+
+### Modules (domain/chess-rules/src)
+
+| File | Responsibility | Exported from the package |
+|---|---|---|
+| `terminal.ts` (25 lines) | Move-exhaustion rule fact | `evaluateMoveExhaustion`, `MoveExhaustionFact` |
+| `san.ts` (89 lines) | Chess One canonical SAN output | `toCanonicalSan` |
+| `legal-moves.ts` | New internal `legalMovesFrom` and `resolveLegalMove`; `applyLegalMove` now delegates to them | Unchanged export |
+| `move-generation.ts` | New internal `isCaptureMove`, shared by the transition and SAN | No |
+
+### Move-exhaustion fact (Articles 1.4, 5.1.1, 5.2.1)
+
+- `evaluateMoveExhaustion(position)` returns `null` while the side to move has a legal move.
+- With no legal move, it returns a frozen `{ kind: "checkmate", winner, loser }` when that side is in check, otherwise a frozen `{ kind: "stalemate" }`.
+- It is a pure chess-rule fact. It is not a durable GameResult, `game.finished.v1`, rating event, or tournament result, and it is not connected to persistence.
+- `assessMatingPossibility` stays separate, and DEC-064 still applies: UNKNOWN is never turned into a result. GAP-MATE-001 through 004 remain open.
+
+### Canonical SAN (FIDE Appendix C source vs Chess One serialization)
+
+FIDE Appendix C is the rules source for algebraic notation. Chess One canonical SAN is an engineering contract derived from it. The punctuation choices below are Chess One's; they are not the only notation FIDE allows.
+
+- **Piece letters:** English K, Q, R, B, N. A pawn has no letter.
+- **Captures:** always marked with `x`. A pawn capture names only the source file, as in `exd5`.
+- **Castling:** `O-O` and `O-O-O`, with capital O.
+- **Promotion:** `=Q`, `=R`, `=B`, `=N`, written before any suffix. There is no auto-queen.
+- **Suffixes:** `+` when the side to move after the move is in check and has a legal move; `#` when it is in check with none; no suffix otherwise. `++` is never used.
+- **En passant:** the plain pawn-capture form, as in `exd6`. FIDE permits an `e.p.` indication, but Chess One stores one stable form without it.
+- **Disambiguation:** the rivals are the other pieces of the same kind and colour that can **legally** reach the destination. Use the source file if it is unique, else the source rank, else both. It is general for Q, R, B, N. A pinned piece is never a rival. The king never needs it, because a canonical position has one king per colour. Pawn captures use the file rule instead.
+- **Capture detection:** judged on the pre-move board, through the shared `isCaptureMove`. A capture is an occupied destination or an en passant victim, never just a change of file.
+- **Legality:** `toCanonicalSan` first resolves the intent through `resolveLegalMove`, the same authority as `applyLegalMove`. An illegal intent returns the same `LegalMoveError`; there is no `invalid_san`.
+- **Output only:** SAN is never parsed, and no legality depends on it.
+
+### Ledger status changes
+
+| Row | New status | Evidence |
+|---|---|---|
+| 008b | IMPLEMENTED | SAN `O-O-O`; e1, d1, and c1 unattacked; b1 empty |
+| 009 | IMPLEMENTED | SAN `exd6`; d5 emptied |
+| 011c | IMPLEMENTED | SAN `a8=N` |
+| 012 | IMPLEMENTED | Checkmate fact, winner white, loser black |
+| 013 | IMPLEMENTED | Stalemate fact |
+| 001 | PARTIAL | SAN `e4` and not-terminal are asserted; game sequence +1 is game-layer semantics |
+| 011b | IMPLEMENTED | SAN `a8=Q#`. In fixture `8/P7/8/8/8/8/8/k1K5 w` the promotion is checkmate. The ledger's old expectation `a8=Q` was corrected to `a8=Q#` after the independent Batch 3 review confirmed it. The fixture, the move, and the SAN rules are unchanged |
+
+The ledger-status header now states that "Terminal ... checkmate/stalemate" is asserted as the pure rule fact, and that durable GameResult is later platform work. Rows 014a–c are unchanged.
+
+### Tests
+
+- `san.test.ts`: TST-FOUND-SAN-001–014.
+  - Quiet moves, captures, castling, promotions, check, mate, and en passant.
+  - Disambiguation by file, by rank, by both, with a capture, and with a pinned rival.
+  - Illegal intents return the `applyLegalMove` error, and SAN derivation causes no mutation.
+  - Every fixture must pass `checkPositionConsistency`, and its legal move set is asserted before its SAN.
+- `terminal.test.ts`: TST-FOUND-TERMINAL-001–006.
+  - Three checkmates, including one where Black wins, and three stalemates.
+  - Brute force over every from/to/promotion intent confirms that nothing is accepted in terminal positions.
+  - Check is confirmed by the independent test attack oracle.
+  - Positions with a legal move, even in check, have no fact, and bare kings are not move exhaustion.
+- `san-properties.property.test.ts`: TST-FOUND-SANPROP-001–003.
+  - For every legal move in seven selected positions (initial, Kiwipete, Position 4, a promotion position, en passant, and two check-heavy positions):
+    - SAN succeeds and `applyLegalMove` accepts the move;
+    - the suffix agrees with the oracle's checkers and the next position's move count;
+    - `x` appears exactly on captures and `=` exactly on promotions;
+    - the SAN has a valid shape and is unique within the position.
+  - SAN uniqueness over bounded playouts: 40 runs, up to 30 plies.
+  - Move-exhaustion facts agree with the oracle over 200 playouts from near-terminal starts, with coverage of checkmate, stalemate, and ongoing positions asserted.
+- `support/playouts.ts` now holds the shared playout generator, which `move-properties.property.test.ts` also uses.
+
+A mutation check deliberately broke four things in turn, and each was caught:
+
+| Injected bug | Failing tests |
+|---|---|
+| Pseudo-legal rivals | 1 (SAN-012) |
+| Mate labelled `+` | 3 |
+| En passant not treated as a capture | 3 |
+| Rank tried before file | 2 |
+
+### Perft and performance
+
+- Every Batch 2 perft vector still matches, and none was changed.
+- SANPROP-001 derives SAN for about 200 moves in about 33 ms, roughly 0.15 ms per move.
+- One SAN call:
+  1. resolves the move through the legality authority;
+  2. looks for legal rivals only among same-kind pieces;
+  3. applies the move once;
+  4. inspects the next position's legal moves only when the move gives check.
+- No caches, memoization, or bitboards.
+
+### Gates and supply chain
+
+- 21 test files: 264 passed, 0 failed, 0 skipped, 29 todo. The todo entries are the NOT_IMPLEMENTED ledger rows; the rows moved were PARTIAL, so the todo count did not change.
+- Dependencies added: 0. `package.json` and `pnpm-lock.yaml` are unchanged.
+- No casts, ts-ignore, or ts-expect-error. The boundary rules are unchanged and pass.
+
+### Self-review
+
+- **Is SAN ever trusted as input?** No. No parser exists.
+- **Can an illegal move receive SAN?** No. SAN-013 and the brute-force check in TERMINAL-003 show this.
+- **Can a pinned piece force disambiguation?** No. SAN-012 tests it.
+- **Is en passant counted as a capture?** Yes, through the shared helper.
+- **Do pawn captures name the source file?** Yes.
+- **Does the promotion letter come before `+` or `#`?** Yes.
+- **Is castling notation stable?** Yes, `O-O` and `O-O-O`.
+- **Can two legal moves share SAN?** No. SANPROP-001 and 002 check this.
+- **Can a mate be labelled `+`, or a stalemate called checkmate?** No. These are checked against the oracle.
+- **Did notation duplicate legality logic?** No. SAN uses `resolveLegalMove` and `legalMovesFrom`.
+- **Does SAN mutate anything?** No. SAN-014 checks this.
+- **Did any perft value change?** No.
+- **Was GameResult or persistence introduced?** No.
+
+### Remaining gaps
+
+- No durable GameResult or game events; no draws, repetition, or 50/75-move rules; no resignation, timeout, or clocks; no PGN.
+- Dead-position detection is still partial (GAP-MATE-001 to 004), and 3.10.3 reachability is not proven.
+- ENV-NODE-001 is open.

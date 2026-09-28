@@ -25,3 +25,5 @@ export {
   type RulesetId,
   resolveRuleset,
 } from "./ruleset-registry.ts";
+export { toCanonicalSan } from "./san.ts";
+export { evaluateMoveExhaustion, type MoveExhaustionFact } from "./terminal.ts";

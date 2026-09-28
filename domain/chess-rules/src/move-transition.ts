@@ -8,7 +8,12 @@ import {
   squareIndex,
 } from "@chess-one/game-values";
 import { cellAt, offsetSquare, pawnDirection } from "./attacks.ts";
-import { CASTLING_PATHS, castlingPathOf, enPassantVictim } from "./move-generation.ts";
+import {
+  CASTLING_PATHS,
+  castlingPathOf,
+  enPassantVictim,
+  isCaptureMove,
+} from "./move-generation.ts";
 import { type Board, type CastlingRights, createPosition, type Position } from "./position.ts";
 
 /** Package-internal. Callers must pass a pseudo-legal move of `position.sideToMove`. */
@@ -76,8 +81,7 @@ function castlingAfterMove(position: Position, move: MoveIntent, piece: Piece): 
 export function applyPseudoLegalMove(position: Position, move: MoveIntent): Position {
   const piece = movingPiece(position, move);
   const isPawn = piece.kind === "pawn";
-  const isCapture =
-    cellAt(position.board, move.to) !== null || enPassantVictim(position, move) !== undefined;
+  const isCapture = isCaptureMove(position, move);
   const isDoublePush = isPawn && Math.abs(rankIndex(move.to) - rankIndex(move.from)) === 2;
   const next = createPosition({
     board: boardAfterMove(position, move),

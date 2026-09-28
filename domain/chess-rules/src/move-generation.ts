@@ -94,6 +94,11 @@ export function enPassantVictim(position: Position, move: MoveIntent): Square | 
   return squareAt(fileIndex(move.to), rankIndex(move.from));
 }
 
+/** Judged on the pre-move board: an occupied destination or an en passant victim. */
+export function isCaptureMove(position: Position, move: MoveIntent): boolean {
+  return cellAt(position.board, move.to) !== null || enPassantVictim(position, move) !== undefined;
+}
+
 function intent(from: Square, to: Square, promotion?: PromotionPiece): MoveIntent {
   return Object.freeze(promotion === undefined ? { from, to } : { from, to, promotion });
 }

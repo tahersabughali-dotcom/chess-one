@@ -57,24 +57,29 @@ export function generateLegalMoves(position: Position): readonly MoveIntent[] {
   );
 }
 
+/** Package-internal: the legal moves of the side-to-move piece on `from`. */
+export function legalMovesFrom(position: Position, from: Square): MoveIntent[] {
+  const king = findKingOnBoard(position.board, position.sideToMove);
+  return pseudoLegalMovesFrom(position, from).filter((move) =>
+    isLegalCandidate(position, move, king),
+  );
+}
+
 /**
- * Applies `intent` when it is legal. Only the candidates of the source square
- * are examined, through the same legality test as `generateLegalMoves`.
- * Precedence: an exact legal match is applied; a missing promotion on a legal
- * promotion is `promotion_required`; a promotion on a legal ordinary move is
- * `promotion_unexpected`; anything else is `illegal_move`.
+ * Package-internal: the generated legal move that `intent` names. Only the
+ * candidates of the source square are examined, through the same legality test
+ * as `generateLegalMoves`. Precedence: an exact legal match; a missing
+ * promotion on a legal promotion is `promotion_required`; a promotion on a
+ * legal ordinary move is `promotion_unexpected`; anything else is `illegal_move`.
  */
-export function applyLegalMove(
+export function resolveLegalMove(
   position: Position,
   intent: MoveIntent,
-): Result<Position, LegalMoveError> {
+): Result<MoveIntent, LegalMoveError> {
   if (!isSquare(intent.from) || !isSquare(intent.to)) return err("illegal_move");
-  const king = findKingOnBoard(position.board, position.sideToMove);
-  const legal = pseudoLegalMovesFrom(position, intent.from).filter(
-    (move) => move.to === intent.to && isLegalCandidate(position, move, king),
-  );
+  const legal = legalMovesFrom(position, intent.from).filter((move) => move.to === intent.to);
   const exact = legal.find((move) => move.promotion === intent.promotion);
-  if (exact !== undefined) return ok(applyPseudoLegalMove(position, exact));
+  if (exact !== undefined) return ok(exact);
   if (intent.promotion === undefined && legal.some((move) => move.promotion !== undefined)) {
     return err("promotion_required");
   }
@@ -82,4 +87,13 @@ export function applyLegalMove(
     return err("promotion_unexpected");
   }
   return err("illegal_move");
+}
+
+/** Applies `intent` when it is legal, with the precedence of `resolveLegalMove`. */
+export function applyLegalMove(
+  position: Position,
+  intent: MoveIntent,
+): Result<Position, LegalMoveError> {
+  const move = resolveLegalMove(position, intent);
+  return move.ok ? ok(applyPseudoLegalMove(position, move.value)) : move;
 }

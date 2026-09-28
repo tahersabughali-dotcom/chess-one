@@ -1,21 +1,33 @@
 import {
   applyLegalMove,
   createInitialPosition,
+  evaluateMoveExhaustion,
   formatFen,
   generateLegalMoves,
   isInCheck,
+  isSquareAttacked,
+  pieceAt,
 } from "@chess-one/chess-rules";
 import { describe, expect, it } from "vitest";
 import { goldenFen } from "./fixtures/golden-positions.ts";
-import { attempt, errorOf, fenAfter, legalUci, positionOf, uci } from "./support/positions.ts";
+import {
+  attempt,
+  errorOf,
+  fenAfter,
+  legalUci,
+  positionOf,
+  sanOf,
+  uci,
+} from "./support/positions.ts";
 
 const INITIAL = goldenFen("TST-RULE-E01-001");
 
 describe("Golden ledger movement and legality rows", () => {
-  it("TST-RULE-E01-001 e2e4 is accepted from the initial position", () => {
-    expect(fenAfter(INITIAL, "e2e4")).toBe(
-      "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1",
-    );
+  it("TST-RULE-E01-001 e2e4 is accepted with SAN e4 and is not terminal", () => {
+    const after = fenAfter(INITIAL, "e2e4");
+    expect(after).toBe("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1");
+    expect(sanOf(INITIAL, "e2e4")).toBe("e4");
+    expect(evaluateMoveExhaustion(positionOf(after))).toBeNull();
   });
 
   it("TST-RULE-E01-002 e2e5 is illegal and the position is unchanged", () => {
@@ -65,14 +77,23 @@ describe("Golden ledger movement and legality rows", () => {
     expect(errorOf(fen, "e1g1")).toBe("illegal_move");
   });
 
-  it("TST-RULE-E01-008b queenside castling is accepted; king and rook both move", () => {
-    expect(fenAfter(goldenFen("TST-RULE-E01-008a"), "e1c1")).toBe(
-      "1k3r2/8/8/8/8/8/8/2KR3R b - - 1 1",
-    );
+  it("TST-RULE-E01-008b queenside castling is accepted as O-O-O; king and rook both move", () => {
+    const fen = goldenFen("TST-RULE-E01-008a");
+    const position = positionOf(fen);
+    for (const square of ["e1", "d1", "c1"] as const) {
+      expect(isSquareAttacked(position, square, "black"), square).toBe(false);
+    }
+    expect(pieceAt(position, "b1")).toBeNull();
+    expect(fenAfter(fen, "e1c1")).toBe("1k3r2/8/8/8/8/8/8/2KR3R b - - 1 1");
+    expect(sanOf(fen, "e1c1")).toBe("O-O-O");
   });
 
-  it("TST-RULE-E01-009 en passant is accepted and removes the pawn on d5", () => {
-    expect(fenAfter(goldenFen("TST-RULE-E01-009"), "e5d6")).toBe("4k3/8/3P4/8/8/8/8/6K1 b - - 0 1");
+  it("TST-RULE-E01-009 en passant is accepted as exd6 and removes the pawn on d5", () => {
+    const fen = goldenFen("TST-RULE-E01-009");
+    const after = positionOf(fenAfter(fen, "e5d6"));
+    expect(formatFen(after)).toBe("4k3/8/3P4/8/8/8/8/6K1 b - - 0 1");
+    expect(pieceAt(after, "d5")).toBeNull();
+    expect(sanOf(fen, "e5d6")).toBe("exd6");
   });
 
   it("TST-RULE-E01-010 en passant that exposes the king along the rank is illegal", () => {
@@ -87,28 +108,41 @@ describe("Golden ledger movement and legality rows", () => {
     expect(errorOf(goldenFen("TST-RULE-E01-011a"), "a7a8")).toBe("promotion_required");
   });
 
-  it("TST-RULE-E01-011b a7a8q promotes to a queen", () => {
-    expect(fenAfter(goldenFen("TST-RULE-E01-011a"), "a7a8q")).toBe("Q7/8/8/8/8/8/8/k1K5 b - - 0 1");
+  it("TST-RULE-E01-011b a7a8q promotes to a queen; SAN a8=Q gains # because it mates", () => {
+    const fen = goldenFen("TST-RULE-E01-011a");
+    const after = fenAfter(fen, "a7a8q");
+    expect(after).toBe("Q7/8/8/8/8/8/8/k1K5 b - - 0 1");
+    expect(evaluateMoveExhaustion(positionOf(after))?.kind).toBe("checkmate");
+    expect(sanOf(fen, "a7a8q")).toBe("a8=Q#");
   });
 
-  it("TST-RULE-E01-011c a7a8n underpromotes to a knight", () => {
-    expect(fenAfter(goldenFen("TST-RULE-E01-011a"), "a7a8n")).toBe("N7/8/8/8/8/8/8/k1K5 b - - 0 1");
+  it("TST-RULE-E01-011c a7a8n underpromotes to a knight with SAN a8=N", () => {
+    const fen = goldenFen("TST-RULE-E01-011a");
+    expect(fenAfter(fen, "a7a8n")).toBe("N7/8/8/8/8/8/8/k1K5 b - - 0 1");
+    expect(sanOf(fen, "a7a8n")).toBe("a8=N");
   });
 
   it("TST-RULE-E01-011d e2e4 with a promotion piece is promotion_unexpected", () => {
     expect(errorOf(INITIAL, "e2e4q")).toBe("promotion_unexpected");
   });
 
-  it("TST-RULE-E01-012 Black has no legal move and is in check", () => {
+  it("TST-RULE-E01-012 checkmate fact: Black has no legal move, is in check, White wins", () => {
     const position = positionOf(goldenFen("TST-RULE-E01-012"));
     expect(generateLegalMoves(position)).toEqual([]);
     expect(isInCheck(position, "black")).toBe(true);
+    expect(isSquareAttacked(position, "a8", "white")).toBe(true);
+    expect(evaluateMoveExhaustion(position)).toEqual({
+      kind: "checkmate",
+      winner: "white",
+      loser: "black",
+    });
   });
 
-  it("TST-RULE-E01-013 Black has no legal move and is not in check", () => {
+  it("TST-RULE-E01-013 stalemate fact: Black has no legal move and is not in check", () => {
     const position = positionOf(goldenFen("TST-RULE-E01-013"));
     expect(generateLegalMoves(position)).toEqual([]);
     expect(isInCheck(position, "black")).toBe(false);
+    expect(evaluateMoveExhaustion(position)).toEqual({ kind: "stalemate" });
   });
 });
 

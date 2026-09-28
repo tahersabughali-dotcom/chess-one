@@ -6,7 +6,6 @@ import {
   isCanonicalPosition,
   isInCheck,
   isSquareAttacked,
-  type Position,
   parseFen,
   pieceAt,
 } from "@chess-one/chess-rules";
@@ -21,7 +20,8 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { isAttacked } from "./support/attack-oracle.ts";
 import { playLegal } from "./support/perft.ts";
-import { positionOf, uci } from "./support/positions.ts";
+import { playoutArbitrary, playoutPositions as positionsOf } from "./support/playouts.ts";
+import { uci } from "./support/positions.ts";
 
 const STARTS = [
   "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
@@ -31,26 +31,7 @@ const STARTS = [
   "4k3/1P6/8/8/8/8/6p1/4K3 w - - 0 1",
 ];
 
-const MAX_PLIES = 40;
-
-/** A bounded playout: each choice picks a legal move by index until moves run out. */
-const playout = fc.record({
-  start: fc.constantFrom(...STARTS),
-  choices: fc.array(fc.nat(), { maxLength: MAX_PLIES }),
-});
-
-function positionsOf(start: string, choices: readonly number[]): Position[] {
-  const visited = [positionOf(start)];
-  for (const choice of choices) {
-    const current = visited[visited.length - 1];
-    if (current === undefined) break;
-    const moves = generateLegalMoves(current);
-    const move = moves[choice % Math.max(moves.length, 1)];
-    if (move === undefined) break;
-    visited.push(playLegal(current, move));
-  }
-  return visited;
-}
+const playout = playoutArbitrary(STARTS, 40);
 
 /** Source index, then destination index, then promotion q, r, b, n. */
 function orderKey(move: MoveIntent): number {

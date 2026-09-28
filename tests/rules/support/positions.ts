@@ -5,6 +5,7 @@ import {
   type LegalMoveError,
   type Position,
   parseFen,
+  toCanonicalSan,
 } from "@chess-one/chess-rules";
 import { type MoveIntent, parseMoveIntent, type Result } from "@chess-one/game-values";
 
@@ -34,6 +35,13 @@ export function errorOf(fen: string, uci: string): string {
 
 export function fenAfter(fen: string, uci: string): string {
   return formatFen(play(positionOf(fen), uci));
+}
+
+/** Canonical SAN of a legal move; throws if the move is rejected. */
+export function sanOf(fen: string, uci: string): string {
+  const san = toCanonicalSan(positionOf(fen), intentOf(uci));
+  if (!san.ok) throw new Error(`${uci}: ${san.error}`);
+  return san.value;
 }
 
 export function uci(move: MoveIntent): string {
