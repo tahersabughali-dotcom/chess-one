@@ -1,0 +1,27 @@
+{
+  "name": "chess-one",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.6.0",
+  "engines": {
+    "node": ">=24.11.0 <25.0.0",
+    "pnpm": "12.6.0"
+  },
+  "scripts": {
+    "typecheck": "tsc -p domain/game-values && tsc -p domain/chess-rules && tsc -p tests && tsc -p tooling",
+    "lint": "biome check --formatter-enabled=false .",
+    "format:check": "biome format .",
+    "test": "vitest run",
+    "test:rules": "vitest run --project rules",
+    "check:boundaries": "node tooling/check-boundaries.ts",
+    "check": "tsc -p domain/game-values && tsc -p domain/chess-rules && tsc -p tests && tsc -p tooling && biome check --formatter-enabled=false . && biome format . && node tooling/check-boundaries.ts && vitest run"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.14",
+    "@types/node": "24.19.0",
+    "fast-check": "4.10.2",
+    "typescript": "7.0.2",
+    "vitest": "5.0.2"
+  }
+}

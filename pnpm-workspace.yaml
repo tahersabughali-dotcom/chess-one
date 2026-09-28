@@ -1,0 +1,6 @@
+packages:
+  - domain/*
+  - tests/*
+
+engineStrict: true
+saveExact: true

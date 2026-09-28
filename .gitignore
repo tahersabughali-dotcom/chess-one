@@ -1,0 +1,8 @@
+node_modules/
+coverage/
+dist/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+CHESS_ONE_*_REVIEW_BUNDLE.zip
