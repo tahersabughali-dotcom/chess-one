@@ -25,10 +25,24 @@ export interface GameSeatGrant {
   readonly controlLeaseId: ControlLeaseId;
 }
 
+/**
+ * How an open connection learns that its session ended. `watch` is told at
+ * once when this process revokes the session; `check` is the periodic
+ * recheck that also catches revocations made elsewhere. Neither runs per
+ * message, so command receipt never waits on the session store.
+ */
+export interface SessionLiveness {
+  check(): Promise<boolean>;
+  /** Calls `onEnd` at most once; returns the unsubscribe. */
+  watch(onEnd: () => void): () => void;
+}
+
 /** The only source of actor identity and seats for a connection. */
 export interface TrustedSessionContext {
   readonly actorId: PlayerId;
   readonly grants: readonly GameSeatGrant[];
+  /** Absent for sessions that cannot end while connected (test resolvers). */
+  readonly liveness?: SessionLiveness;
 }
 
 /**

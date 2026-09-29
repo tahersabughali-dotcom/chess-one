@@ -611,3 +611,132 @@ describe("TST-BOUNDARY realtime layers", () => {
     ).toEqual([]);
   });
 });
+
+const id = (name: string, content: string): SourceFile => ({
+  path: `domain/identity/src/${name}`,
+  content,
+});
+const acc = (name: string, content: string): SourceFile => ({
+  path: `server/accounts/src/${name}`,
+  content,
+});
+const accStore = (name: string, content: string): SourceFile => ({
+  path: `server/accounts-persistence/src/${name}`,
+  content,
+});
+
+describe("TST-BOUNDARY accounts layers", () => {
+  it("TST-BOUNDARY-035 identity is pure: no server, database, HTTP, crypto, clock, or environment", () => {
+    for (const code of [
+      'import Fastify from "fastify";',
+      'import { Kysely } from "kysely";',
+      'import { Accounts } from "@chess-one/accounts";',
+      'import { randomBytes } from "node:crypto";',
+      'import { GameWriterRegistry } from "@chess-one/live-game-runtime";',
+    ]) {
+      expect(rulesFor(id("a.ts", code)), code).toContain("forbidden_import");
+    }
+    for (const code of [
+      "const t = Date.now();",
+      "const e = process.env.X;",
+      "const r = Math.random();",
+    ]) {
+      expect(rulesFor(id("a.ts", code)), code).toContain("ambient_access");
+    }
+  });
+
+  it("TST-BOUNDARY-036 accounts sees identity and node:crypto only; no Fastify, database, or game", () => {
+    for (const code of [
+      'import { parseUsername } from "@chess-one/identity";',
+      'import { randomBytes, argon2 } from "node:crypto";',
+    ]) {
+      expect(rulesFor(acc("a.ts", code)), code).toEqual([]);
+    }
+    for (const code of [
+      'import Fastify from "fastify";',
+      'import { Kysely } from "kysely";',
+      'import pg from "pg";',
+      'import { PostgresAccountsRepository } from "@chess-one/accounts-persistence";',
+      'import { processCommand } from "@chess-one/live-game";',
+      'import { GameWriterRegistry } from "@chess-one/live-game-runtime";',
+      'import { createRealtimeEdge } from "@chess-one/edge";',
+      'import { readFile } from "node:fs/promises";',
+    ]) {
+      expect(rulesFor(acc("a.ts", code)), code).toContain("forbidden_import");
+    }
+    expect(rulesFor(acc("system.ts", "const t = Date.now();"))).toEqual([]);
+    for (const code of [
+      "const t = Date.now();",
+      "const d = new Date();",
+      "const e = process.env.PEPPER;",
+      "const r = Math.random();",
+      'console.log("x");',
+    ]) {
+      expect(rulesFor(acc("credentials.ts", code)), code).toContain("ambient_access");
+    }
+    expect(rulesFor(acc("system.ts", "const e = process.env.PEPPER;"))).toContain("ambient_access");
+  });
+
+  it("TST-BOUNDARY-037 the accounts store adapter has no transport, game, or clock outside wall-time.ts", () => {
+    expect(
+      rulesFor(accStore("a.ts", 'import { Kysely } from "kysely"; import pg from "pg";')),
+    ).toEqual([]);
+    for (const code of [
+      'import Fastify from "fastify";',
+      'import { processCommand } from "@chess-one/live-game";',
+      'import { PostgresLiveGameRepository } from "@chess-one/live-game-persistence";',
+    ]) {
+      expect(rulesFor(accStore("a.ts", code)), code).toContain("forbidden_import");
+    }
+    expect(rulesFor(accStore("wall-time.ts", "const s = new Date(0).toISOString();"))).toEqual([]);
+    expect(rulesFor(accStore("repository.ts", "const s = new Date(0).toISOString();"))).toContain(
+      "ambient_access",
+    );
+  });
+
+  it("TST-BOUNDARY-038 the edge reaches accounts through its public entry only, never its store", () => {
+    expect(
+      rulesFor(edge("a.ts", 'import type { AccountsApi } from "@chess-one/accounts";')),
+    ).toEqual([]);
+    expect(
+      rulesFor(
+        edge(
+          "a.ts",
+          'import { PostgresAccountsRepository } from "@chess-one/accounts-persistence";',
+        ),
+      ),
+    ).toContain("forbidden_import");
+    expect(
+      rulesFor(edge("a.ts", 'import { login } from "../../accounts/src/credentials.ts";')),
+    ).not.toEqual([]);
+  });
+
+  it("TST-BOUNDARY-039 the live-game core and runtime never depend on accounts", () => {
+    for (const layer of [lg, rt]) {
+      expect(rulesFor(layer("a.ts", 'import { Accounts } from "@chess-one/accounts";'))).toContain(
+        "forbidden_import",
+      );
+    }
+    expect(
+      rulesFor({
+        path: "server/live-game/package.json",
+        content: JSON.stringify({
+          exports: { ".": "./src/index.ts" },
+          dependencies: { "@chess-one/accounts": "workspace:*" },
+        }),
+      }),
+    ).not.toEqual([]);
+  });
+
+  it("TST-BOUNDARY-040 clients never import accounts or its store", () => {
+    const client = (content: string): SourceFile => ({ path: "clients/web/src/a.ts", content });
+    expect(rulesFor(client('import { Accounts } from "@chess-one/accounts";'))).toContain(
+      "client_imports_server",
+    );
+    expect(
+      rulesFor(
+        client('import { PostgresAccountsRepository } from "@chess-one/accounts-persistence";'),
+      ),
+    ).toContain("client_imports_persistence");
+  });
+});

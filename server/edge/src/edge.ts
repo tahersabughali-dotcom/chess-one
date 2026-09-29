@@ -2,6 +2,7 @@ import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import Fastify, { type FastifyInstance } from "fastify";
 import { WebSocketServer } from "ws";
+import { registerAuthRoutes } from "./auth/routes.ts";
 import { type EdgeConfig, type ResolvedEdgeConfig, resolveEdgeConfig } from "./config.ts";
 import { CLOSE_NORMAL, RealtimeConnection } from "./connection.ts";
 import type { UpgradeRejection } from "./facts.ts";
@@ -106,6 +107,22 @@ function refuseUpgrade(socket: Duplex, rejection: Rejection): void {
   );
 }
 
+/**
+ * Response headers for every HTTP answer. This host serves JSON only, never
+ * a document, so the CSP forbids everything; it is not a policy for a web
+ * client, which will need its own. HSTS is sent in production only, where
+ * every origin is https.
+ */
+const SECURITY_HEADERS: readonly (readonly [string, string])[] = [
+  ["cache-control", "no-store"],
+  ["x-content-type-options", "nosniff"],
+  ["referrer-policy", "no-referrer"],
+  ["x-frame-options", "DENY"],
+  ["content-security-policy", "default-src 'none'; frame-ancestors 'none'"],
+  ["cross-origin-resource-policy", "same-origin"],
+];
+const HSTS = "max-age=31536000";
+
 type Resolution = { readonly session: TrustedSessionContext | null } | { readonly timedOut: true };
 
 /** An upgrade waiting for its session; `close` waits for every one to settle. */
@@ -135,9 +152,26 @@ export function createRealtimeEdge(input: EdgeConfig): RealtimeEdge {
   let nextConnection = 1;
   let closing = false;
 
+  app.addHook("onSend", async (_request, reply, payload) => {
+    for (const [name, value] of SECURITY_HEADERS) reply.header(name, value);
+    if (config.environment === "production") reply.header("strict-transport-security", HSTS);
+    return payload;
+  });
+
   app.get(REALTIME_PATH, async (_request, reply) =>
     reply.code(426).header("upgrade", "websocket").send({ code: "UPGRADE_REQUIRED" }),
   );
+
+  if (config.auth !== null) {
+    registerAuthRoutes(app, {
+      accounts: config.auth.accounts,
+      cookie: config.auth.cookie,
+      allowedOrigins: config.allowedOrigins,
+      maxCookieLength: limits.maxCredentialLength,
+      facts,
+      reportDefect: config.reportDefect,
+    });
+  }
 
   const refuse = (socket: Duplex, rejection: Rejection): void => {
     facts.record({ name: "upgrade_rejected", status: rejection.status, reason: rejection.reason });

@@ -355,6 +355,7 @@ Added in Phase 1 Batch 9 (2026-09-29), pending review; decisions LIVE-RT-001 to 
 - The first message must be `hello` within the handshake timeout; the server answers `connection_ready`.
 - Frames: UTF-8 text JSON only, one message per frame, at most the advertised `maxMessageBytes` (4096 by default, never above 16384).
 - Close codes: 1000, 1002, 1008, 1009 only (LIVE-RT-014).
+- *Batch 10:* the production resolver reads only the session cookie (section 12); the `Authorization` header is not a credential there. A connection whose session ends is closed 1008 with reason `session_ended`, or `session_unverifiable` if the session store cannot answer the periodic recheck (AUTH-REVOCATION-001).
 
 ### 11.2 Client messages / رسائل العميل
 
@@ -402,3 +403,50 @@ A client format, separate from the stored `live_game_state.v1`: `format`, `gameI
 - Not realized yet: ViewOnly, LeaseSuperseded, lease takeover, and AbandonmentEvaluation (LIVE-MULTI-CONNECTION-001, LIVE-VIEW-ONLY-001).
 
 الاتصال عبر WebSocket بالبروتوكول الفرعي `chess_one.realtime.v1`. الهوية والمقعد وعقد التحكم من الجلسة الموثوقة فقط. زمن الاستلام يختمه كاتب اللعبة الوحيد عند قبول الأمر في طابوره. الرد يسبق التحديث، ولا يُرسل تسلسل أقل مما أُرسل. عند الشك: إعادة اتصال ثم مزامنة.
+
+## 12. Authentication API `/auth` / واجهة المصادقة
+
+Added in Phase 1 Batch 10 (2026-09-29) and amended by Batch 10.1, pending review; decisions AUTH-* in changelog sections 20 and 21. Served by the realtime edge on the same origin as `/realtime`.
+
+### 12.1 Session cookie / ملف تعريف الجلسة
+
+- Production: `__Host-chess_one_session=<token>; Path=/; Max-Age=<seconds to absolute expiry>; HttpOnly; Secure; SameSite=Lax`, no `Domain`. Test/loopback only: `chess_one_session`, the same without `Secure`.
+- The token is 43 base64url characters (256 random bits). It is the only credential; it never appears in a body. Clearing: the same name with an empty value and `Max-Age=0`.
+- A request with a duplicated or malformed session cookie is unauthenticated (fail closed).
+
+### 12.2 Request rules / قواعد الطلب
+
+- State changes are `POST` or `DELETE`. Every non-GET request must carry an allowlisted `Origin` (else 403 `ORIGIN_NOT_ALLOWED`); every `POST` must be `application/json` (else 415 `UNSUPPORTED_MEDIA_TYPE`); `Sec-Fetch-Site: cross-site` is refused on every route (403). No CORS headers are sent.
+- Bodies: one flat JSON object with exactly the listed string members, at most 8192 bytes (413 `PAYLOAD_TOO_LARGE`); duplicate keys, extra or missing members, non-strings, and malformed JSON are 400 `INVALID_REQUEST`. No body member names a user, session owner, role, or seat.
+- New passwords (`password` on register, `newPassword` on change and reset; Batch 10.1, AUTH-PASSWORD-002): 15 to 256 Unicode code points, used exactly as sent (never trimmed, normalized, or truncated); spaces allowed; no composition rules. Refusals are 400 `VALIDATION_FAILED` with `field` and `reason` `too_short` (fewer than 15), `too_long` (more than 256), `malformed_unicode`, `control_characters`, `matches_account_identifier` (equals the username or email in any case), or `compromised`. A login `password` is only checked to be non-empty, well-formed, and at most 256 code points. `email` is required on registration (AUTH-EMAIL-REQUIRED-001). There is no username-change route (AUTH-USERNAME-RENAME-001).
+
+### 12.3 Routes / المسارات
+
+| Route | Body | Success | Notes |
+|---|---|---|---|
+| `POST /auth/register` | `username`, `email`, `password` | 201 `auth_user.v1` + cookie | Signs in at once, verified or not. 409 `USERNAME_UNAVAILABLE` / `EMAIL_UNAVAILABLE` (bare codes, no explanatory text; the email answer still discloses registration, AUTH-ENUMERATION-001) |
+| `POST /auth/login` | `identifier` (username or email), `password` | 200 `auth_user.v1` + new cookie | 401 `INVALID_CREDENTIALS` for unknown account and wrong password alike; 403 `ACCOUNT_UNAVAILABLE` only after the correct password |
+| `POST /auth/logout` | `{}` | 204, cookie cleared | Idempotent; no session needed |
+| `POST /auth/logout-all` | `{}` | 204, cookie cleared | Ends every session of the user, the current one included |
+| `GET /auth/me` | none | 200 `auth_user.v1` | |
+| `GET /auth/sessions` | none | 200 `auth_sessions.v1` | Live sessions, current one marked |
+| `DELETE /auth/sessions/:sessionId` | none | 204 (cookie cleared if it was the current session) | Another user's or an unknown id is 404 `NOT_FOUND` |
+| `POST /auth/password` | `currentPassword`, `newPassword` | 200 `auth_user.v1` + new cookie | Ends every session, then signs this device in again. Wrong current password 403 `INVALID_CREDENTIALS` |
+| `POST /auth/password-reset/request` | `email` | 202 | Same answer whether or not the address has an account |
+| `POST /auth/password-reset/confirm` | `token`, `newPassword` | 204 | Single use; ends every session; signs nobody in. 400 `INVALID_TOKEN` |
+| `POST /auth/email-verification/request` | `{}` | 202 | Needs a session; 409 `ALREADY_VERIFIED` |
+| `POST /auth/email-verification/confirm` | `token` | 204 | Single use. 400 `INVALID_TOKEN` |
+
+Authenticated routes answer 401 `UNAUTHENTICATED` without a valid session, and clear a presented cookie. Any other path or method under `/auth` is 404 `NOT_FOUND`. Reset and verification answer 501 `FEATURE_UNAVAILABLE` when no delivery channel is configured.
+
+### 12.4 Wire formats / صيغ الرسائل
+
+- `auth_user.v1`: `{ "format": "auth_user.v1", "user": { "userId", "username", "status", "emailVerified" } }`. `status` is `active` here. `emailVerified` is what future high-trust features will require (AUTH-EMAIL-VERIFIED-001); nothing requires it yet. No email address, hash, token, or internal field.
+- `auth_sessions.v1`: `{ "format": "auth_sessions.v1", "sessions": [ { "sessionId", "createdAt", "lastSeenAt", "current" } ] }`, times in epoch milliseconds.
+- `auth_error.v1`: `{ "format": "auth_error.v1", "code", "field"?, "reason"?, "retryAfterMs"? }`. Codes: `INVALID_REQUEST`, `VALIDATION_FAILED` (with `field` and a policy `reason` such as `too_short`), `INVALID_TOKEN`, `INVALID_CREDENTIALS`, `UNAUTHENTICATED`, `ACCOUNT_UNAVAILABLE`, `ORIGIN_NOT_ALLOWED`, `NOT_FOUND`, `USERNAME_UNAVAILABLE`, `EMAIL_UNAVAILABLE`, `ALREADY_VERIFIED`, `PAYLOAD_TOO_LARGE`, `UNSUPPORTED_MEDIA_TYPE`, `RATE_LIMITED` (429, with `retryAfterMs` and `Retry-After`), `FEATURE_UNAVAILABLE` (501), `SERVICE_BUSY` (503, `Retry-After: 1`), `SERVICE_UNAVAILABLE` (503). No error carries SQL, SQLSTATE, a table name, or a stack.
+
+### 12.5 Realtime link / الربط مع الاتصال الفوري
+
+The `/realtime` upgrade authenticates with the same cookie (section 11.1). The actor is the account's `userId`; seats and control leases come from game assignment, never from the session or the client. Ending a session closes its sockets (1008 `session_ended`).
+
+المصادقة بملف تعريف جلسة HttpOnly فقط، ولا يحمل أي جسم رسالة هوية المستخدم أو مقعده. رسالة فشل الدخول واحدة للحساب غير الموجود ولكلمة المرور الخاطئة. تسجيل الخروج يُنهي الجلسة في قاعدة البيانات ويغلق اتصالاتها المفتوحة فورًا.

@@ -21,6 +21,14 @@ export default defineConfig({
           testTimeout: 20_000,
         },
       },
+      {
+        test: {
+          name: "accounts",
+          include: ["tests/accounts/**/*.test.ts"],
+          exclude: [...configDefaults.exclude, "tests/accounts/**/*.db.test.ts"],
+          testTimeout: 20_000,
+        },
+      },
     ],
   },
 });

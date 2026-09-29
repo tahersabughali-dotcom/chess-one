@@ -2055,3 +2055,140 @@ Also:
 - 0 failed, 0 skipped, 0 blocked, 0 todo.
 - **Audit:** no known vulnerabilities.
 - No dependency, cast, `as const`, `ts-ignore`, `ts-expect-error`, or `biome-ignore` was added.
+
+## PHASE 1 / BATCH 10 — ACCOUNTS + IDENTITY + AUTHENTICATION FOUNDATION
+
+Owner-authorized (2026-09-29): registration, login, logout, Argon2id password storage, opaque server sessions in HttpOnly cookies, revocation, and a production `TrustedSessionResolver` wired to the realtime edge. Batch 9, 9.1, and 9.2 are committed as `21362ce`; Batch 10 is uncommitted and pending review, and HEAD stays `21362ceeaceab27dd5aaaca90b5deb86ea2dd4d2`. No remote, no push, no ZIP. Not in scope and not built: final UI, OAuth, MFA, friends, matchmaking, rating, tournaments, payments, store, messages, full profiles, RBAC, SMTP or any email provider. Owner decisions applied: logout-all revokes every session including the current one; registration signs the user in at once; a password change revokes every session including the current one and then issues a new session to the device that changed it. No rule, live-game, persistence (live-game), runtime, or realtime protocol behaviour changed; the edge gained the `/auth` routes and two close reasons.
+
+### Layering
+
+`domain/identity` (pure values and policies) → `server/accounts` (application: use cases, hashing, tokens, sessions, throttling; knows no HTTP, SQL, or game) → `server/accounts-persistence` (PostgreSQL adapter, Kysely) → `server/edge` (HTTP `/auth` routes and the production session resolver). `server/live-game*` never depend on accounts; accounts never imports live-game. Every boundary is enforced by `check:boundaries` (TST-BOUNDARY-035 to 040).
+
+### Identity (`domain/identity/src`)
+
+- `user-id.ts`: `UserId` is a lowercase random v4 UUID chosen by the server (`randomUUID` in `server/accounts`). The username and email are never keys.
+- `username.ts`: ASCII letters, digits, `_`, `-`; 3 to 24 characters; alphanumeric first and last; no `__`, `--`, `_-`, `-_`; a small reserved list (`admin`, `api`, `auth`, `chess-one`, ...). The display form is kept exactly as typed; the canonical form is ASCII lowercase, so `Taher`, `taher`, and `TAHER` are one account. No Unicode, so no confusables.
+- `email.ts`: only surrounding whitespace is trimmed and case is folded (the whole address, documented as a deliberate simplification: RFC 5321 local parts are case-sensitive in theory, never in practice for account providers). Dots and `+tags` are kept; no provider-specific rules. Printable ASCII only, at most 254 characters, local part at most 64, one `@`, dot-atom local part, LDH domain labels with a dot. `email` (display) and `canonical_email` are stored separately with a unique constraint on the canonical form. IDN/EAI addresses are refused (AUTH-EMAIL-IDN-001).
+- `password-policy.ts`: 15 to 256 code points (12 until Batch 10.1); passphrases and spaces are allowed; nothing is trimmed, normalized, or truncated; ill-formed UTF-16 and control characters are refused; a new password may not equal the username or email in any case. Login checks only that the input is encodable and at most 256 code points, so accounts created under an earlier, lower minimum still sign in. No composition rules.
+- `login-identifier.ts`: with `@` an email, without a username, anything else `unknown` (still hashed against the dummy).
+- `account-status.ts`: `active`, `disabled`, `locked`; only `active` authenticates.
+
+### Password hashing (`server/accounts/src/password-hasher.ts`)
+
+- **Library:** Node's built-in `crypto.argon2` (Node 24.7+, OpenSSL 3.2+ implementation). No new dependency. Vetting: part of the Node runtime already trusted by the project, maintained by the Node security team, no native add-on to build, no install scripts. On construction the hasher runs the RFC 9106 §5.3 Argon2id known-answer test and refuses to start if the runtime disagrees (TST-AUTH-HASH-001).
+- **Parameters (configuration):** production default RFC 9106 second recommended option: m = 64 MiB, t = 3, p = 4, 16-byte salt, 32-byte tag. A hasher reports `production` strength only if its parameters meet an OWASP minimum row (m ≥ 46 MiB at t = 1, 19 MiB at t = 2, 12 MiB at t = 3, ...); weaker parameters are `test_only` and a production accounts configuration refuses them (TST-AUTH-CONFIG-001). Tests use 8 KiB, t = 1.
+- **Format:** the PHC string `$argon2id$v=19$m=…,t=…,p=…$salt$tag`, parsed strictly (canonical unpadded base64, bounded parameters, argon2id v19 only). `needsRehash` compares stored parameters with the configured ones; a successful login with outdated parameters rehashes and stores the new hash by compare-and-set (`password_rehashed`).
+- **Bounded work:** a `WorkGate` limits concurrent derivations (`maxConcurrent`) and waiting ones (`maxWaiting`); past that a request is refused synchronously as `busy` (HTTP 503 `SERVICE_BUSY`, `Retry-After: 1`), never queued without bound.
+- **Enumeration:** verifying against a missing hash runs one real derivation against a dummy hash made at startup with the same parameters, so an unknown account costs the same Argon2id work as a wrong password (TST-AUTH-HASH-005, TST-AUTH-LOGIN-002). No timing-based test.
+- **Compromised passwords:** `CompromisedPasswordScreen` extension point, consulted for every new password (registration, change, reset). The default screens nothing; no external call is made (AUTH-BREACHED-PASSWORD-001).
+- **Pepper:** none (AUTH-PEPPER-001).
+
+### Tokens (`tokens.ts`)
+
+Session, reset, and verification tokens are 32 bytes from `crypto.randomBytes`, encoded base64url (43 characters). Only `SHA-256("chess-one:<purpose>:v1:" + token)` is stored (32-byte `bytea`); a token of one purpose never matches another purpose's digest. Malformed token shapes are refused before any lookup. Tokens, digests, and passwords never appear in facts, errors, logs, or response bodies.
+
+### Sessions
+
+- **Cookie:** production `__Host-chess_one_session=<token>; Path=/; Max-Age=<absolute lifetime>; HttpOnly; Secure; SameSite=Lax`, no `Domain`. The test and loopback mode `chess_one_session` drops only `Secure` (and therefore the `__Host-` prefix); a production edge refuses it (`EdgeConfigError`, TST-AUTH-COOKIE-005).
+- **Lifetime (AUTH-SESSION-002):** absolute 30 days, never extended; idle 7 days; `last_seen_at` written at most once per 15 minutes; at most 32 counting sessions per user, the least recently seen revoked (`session_limit`) under the user row lock. Every use checks: not revoked, before absolute expiry, within the idle window, account active.
+- **Revocation:** logout (idempotent, clears the cookie even without a session), logout-all (including the current session), revoke one own session (another user's id is 404, IDOR), password change, password reset, account disabled or locked, session limit. Revocation is a database row update with a reason.
+- **Session fixation:** every sign-in (register, login, password change) creates a new random token; a token the client presents is never adopted or extended into a new session (TST-AUTH-E2E-003).
+- **Maintenance:** `purgeEnded(retentionMs)` deletes sessions revoked or absolutely expired before the cutoff and expired action tokens; the host schedules it (no timer inside accounts).
+
+### Use cases (`credentials.ts`, `recovery.ts`, `sessions.ts`, `accounts.ts`)
+
+- **register:** throttle (client address, then registration), validate username, email, and password, screen, hash, then one transaction inserts `users`, `user_credentials`, and the first session. The unique constraints decide races: `username_taken`/`email_taken` → `username_unavailable`/`email_unavailable` (409). Registration therefore reveals that a name or address is taken (AUTH-ENUMERATION-001).
+- **login:** by username or email in any case; throttled per client address and per canonical identifier; always exactly one Argon2id verification. Unknown account and wrong password are one answer (`INVALID_CREDENTIALS`, 401, byte-identical bodies). A disabled or locked account is revealed (`ACCOUNT_UNAVAILABLE`, 403) only after the correct password, with the fact `account_disabled_auth_attempt`. The session is created in one transaction under the user row lock, and only if the stored hash is still the one the login verified (or rehashed to): a password change or reset that commits while the Argon2id verification runs would otherwise leave the old password with a fresh session after every session was revoked. That login gets `INVALID_CREDENTIALS` and the fact `login_failure password_changed` (`createSession` returns `stale`; TST-AUTH-LOGIN-006, TST-AUTH-DB-017). This race was found during the batch's self-review and fixed before review.
+- **changePassword:** needs the current password (throttled per user), screens the new one, then in one transaction compare-and-sets the hash, revokes every session, and inserts the new session.
+- **password reset:** `requestPasswordReset` always answers 202 for a well-formed address; only an active account's address gets a token, delivered through `AccountTokenDelivery` (a test sink in this batch; no SMTP). The token (30 minutes, single use, bound to the address it was sent to, superseding earlier ones) is consumed by one conditional UPDATE; the reset sets the password, revokes every session, and signs nobody in.
+- **email verification:** request needs a session (202, or 409 `ALREADY_VERIFIED`); confirm consumes a 24-hour single-use token. Verified status is stored and shown as `emailVerified`; nothing requires it yet.
+- **setAccountStatus:** disabling or locking revokes every session and closes the user's open sockets. No admin API or role exists; the operation is for a future operator tool.
+- **Transactions:** every multi-row change is one transaction; failures inside roll back completely (TST-AUTH-DB-012 to 015). Store errors become `AccountsStoreError(operation, detail)` where the detail is only `sqlstate XXXXX`, `malformed <column>`, or `unexpected`; the edge answers 503 `SERVICE_UNAVAILABLE` with no SQL, SQLSTATE, table, or driver text.
+
+### Rate limits (AUTH-RATE-LIMIT-001)
+
+In-process credit buckets, keyed by a SHA-256 digest (never the raw identifier), with LRU eviction at `maxKeysPerLimiter` (50000) per scope: client address 30 burst, 1 per 2 s; registration 10, 1 per 5 min; login identifier 10, 1 per min; password change 5, 1 per min; reset request 3, 1 per 15 min; verification request 3, 1 per 15 min. A refused attempt costs no hashing, answers 429 with `Retry-After`, and never locks the account. Single-process only (AUTH-RATE-LIMIT-DISTRIBUTED-001). The client address is Fastify's `request.ip` with `trustProxy` off (AUTH-PROXY-001).
+
+### HTTP (`server/edge/src/auth`)
+
+- **Routes** under `/auth`: `POST /register` (201), `POST /login` (200), `POST /logout` (204), `POST /logout-all` (204), `GET /me`, `GET /sessions`, `DELETE /sessions/:sessionId` (204), `POST /password` (200 with a new cookie), `POST /password-reset/request` (202), `POST /password-reset/confirm` (204), `POST /email-verification/request` (202), `POST /email-verification/confirm` (204). Anything else is 404 `auth_error.v1`.
+- **Bodies:** `application/json` only, at most 8192 bytes (413), parsed by the edge's strict JSON parser (flat object, string members, no duplicate keys, at most 4 keys, strings at most 1024), with exactly the expected members; anything else is 400 `INVALID_REQUEST`. No body field names a user, session, role, or seat; identity comes only from the cookie.
+- **Wire formats:** `auth_user.v1` `{userId, username, status, emailVerified}` (no email, hash, token, or internal field); `auth_sessions.v1` `{sessionId, createdAt, lastSeenAt, current}`; `auth_error.v1` `{code, field?, reason?, retryAfterMs?}`. Catalog section 12.
+- **CSRF (AUTH-CSRF-001):** SameSite=Lax cookies; every non-GET request must carry an allowlisted `Origin` (the edge's exact-match allowlist, never `*`); POST must be `application/json` (a cross-site HTML form cannot send it, 415); `Sec-Fetch-Site: cross-site` is refused on every route; no CORS headers are ever sent, so no cross-origin script can read a response. A synchronizer CSRF token was evaluated and not added: with these four checks it defends nothing extra for a same-origin JSON API.
+- **Security headers** on every edge response: `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`, `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'` (for the API's own responses only; this is not a site CSP), `Cross-Origin-Resource-Policy: same-origin`, and HSTS (`max-age=31536000`) in production only.
+- **Logging:** Fastify logging stays off; facts carry codes and ids only.
+
+### Realtime (`session-resolver.ts`, `connection.ts`)
+
+- `ProductionTrustedSessionResolver`: cookie → token digest → session → account status → `actorId = userId`. The `Authorization` header is not a credential. Seats and control leases come from a `GameAccessResolver`; production has `NO_GAME_ACCESS` (grants nothing) until matchmaking exists, and tests use a `test_only` adapter. Its trust is `production` only with a secure cookie and production game access.
+- Missing, malformed, duplicated, unknown, expired, idle, or revoked sessions and disabled or locked accounts are refused 401 before the upgrade.
+- **Open sockets (AUTH-REVOCATION-001):** each connection registers a watcher for its session. A revocation made by this process (logout, logout-all, revoke one, password change or reset, disable, session limit) closes the matching sockets at once with 1008 `session_ended`. A periodic recheck (`sessionRecheckIntervalMs`, default 60 s, ceiling 1 h) catches revocations made elsewhere and expiries; a recheck the store cannot answer closes with 1008 `session_unverifiable`. No per-message database lookup. Watchers are removed when a socket closes, so the registry holds only open connections.
+- **Session epoch:** evaluated and not added; every revocation already names its sessions, and the recheck covers the rest.
+- Email never appears in any WebSocket message.
+
+### Persistence (`server/accounts-persistence`)
+
+Migrations 001 to 004 (new files only; live-game migrations untouched), with their own bookkeeping tables `accounts_schema_migrations` and `accounts_schema_migration_lock` (DEC-048 ownership): `users` (format, canonical-form, and status checks; unique canonical username and email), `user_credentials` (PHC format check, scheme `argon2id`), `user_sessions` (32-byte digest, unique; time and revocation-reason consistency checks; partial index on live sessions per user), `account_action_tokens` (digest key, purpose, expiry). No password column in `users`. Timestamps are written as ISO strings from `wall-time.ts` and read as epoch milliseconds computed in SQL; the driver never parses dates. `accountsMigrator(db, dir, schema)` pins the bookkeeping tables to a schema: without it Kysely accepts a same-named bookkeeping table in any schema (found when two suites migrated concurrently; TST-AUTH-DB-016).
+
+A constraint defect was found by the new PostgreSQL tests and fixed: the session revocation check accepted `revoked_at` with a NULL reason (`NULL IN (...)` is not false). It now requires the reason explicitly (TST-AUTH-DB-004).
+
+### Facts
+
+`registration_success`, `registration_rejected`, `login_success`, `login_failure`, `session_created`, `session_revoked`, `session_rejected`, `password_changed`, `password_change_failed`, `password_rehashed`, `password_reset_requested`, `password_reset_completed`, `password_reset_rejected`, `email_verification_requested`, `email_verified`, `email_verification_rejected`, `account_status_changed`, `account_disabled_auth_attempt`, `token_delivery_failed`, `auth_rate_limited` (accounts), and `auth_request_refused {origin | fetch_site | media_type | malformed_cookie}` (edge). Codes and ids only: no password, token, digest, email, or identifier text.
+
+### Tests
+
+- **Local (`pnpm test`, project `accounts`, 100 tests):** `identity.test.ts` (TST-AUTH-ID-001 to 013, with fast-check properties); `primitives.test.ts` (HASH-001 to 010, TOKEN-001 to 003, LIMIT-001 to 004); `accounts.test.ts` over an in-memory repository with PostgreSQL semantics (REG-001 to 004, LOGIN-001 to 006, SESSION-001 to 010, PASSWORD-001 to 003, RECOVERY-001 to 006, THROTTLE-001 to 004, CONFIG-001 to 003, STORE-001); `cookie.test.ts` (COOKIE-001 to 005); `http.test.ts` through Fastify `inject` (HTTP-001 to 019: status codes, cookie attributes, identical failure bodies, IDOR, CSRF and origin refusals, strict bodies, 413, 415, 429, 503 without leaks, security headers, no CORS headers, recovery routes); `websocket-auth.test.ts` with real `ws` sockets (WS-001 to 009: cookie handshake, refusals, immediate close on every revocation path, recheck after an out-of-process revocation, idle expiry, store failure, no per-message lookup).
+- **PostgreSQL (`pnpm test:db` and `pnpm test:auth`, 20 tests):** `accounts.db.test.ts` (TST-AUTH-DB-001 to 017: migrations up, down, and up again; coexistence with live-game migrations; exact index set; no password or raw-token column; 16 constraint violations by SQLSTATE and constraint name; full flows; digest-only storage; touch throttling and expiry; session cap under concurrency; concurrent duplicate usernames and emails in any case with exactly one winner; single-use reset under six concurrent attempts; rollback of registration, session creation with eviction, password change, and reset; `AccountsStoreError` text without driver detail; schema-pinned bookkeeping; a login whose password changed during verification gets no session); `websocket-auth.db.test.ts` (TST-AUTH-E2E-001 to 003).
+- **TST-AUTH-E2E-001 (§58, all eleven steps):** real HTTP registration of two users; real `fetch` login; the cookie from `Set-Cookie`; a real WebSocket carrying only the cookie; `connection_ready.actorId` is the user id; the seat granted by game access; sync at sequence 0; a move `Accepted` and committed to PostgreSQL (sequence 1), the opponent receiving `game_update`; real logout (204, cookie cleared); the session revoked in PostgreSQL (`logout`) and the socket closed at once with 1008 `session_ended`; reconnect with the same cookie refused 401 and `/auth/me` 401; the opponent's socket unaffected.
+- **Boundaries:** TST-BOUNDARY-035 to 040 (identity pure; accounts without Fastify, database, or game; the accounts store without transport or clock outside `wall-time.ts`; the edge through the accounts public entry only and never its store; live-game core and runtime without accounts; clients without accounts or its store) and 041 (auth test wiring, no skips). `writer_bypass` unchanged.
+
+### Dependencies
+
+No new third-party dependency. New workspace packages `@chess-one/identity`, `@chess-one/accounts`, `@chess-one/accounts-persistence`, `@chess-one/tests-accounts`; the edge depends on `@chess-one/accounts`. Existing exact pins reused (kysely 0.29.6, pg 8.23.0, @types/pg 8.23.1, ws 8.22.0, @types/ws 8.18.1).
+
+### Gates (Node 24.21.0, pnpm 12.7.0, TypeScript 7.0.2, PostgreSQL 18.6, database `chess_one_test`)
+
+- typecheck, lint, format:check, check:boundaries, test, test:rules, check, audit, test:db, test:realtime, and the new test:auth all pass (exit 0).
+- **Normal suite:** 57 files, 692 passed. By project: rules 291, boundaries 41, live-game 117, persistence 49, realtime 94, accounts 100.
+- **`test:auth`:** 8 files, 120 passed. **`test:db`:** 4 files, 38 passed. **`test:realtime`:** 9 files, 100 passed.
+- 0 failed, 0 skipped, 0 blocked, 0 todo.
+- **Audit:** no known vulnerabilities.
+- No `any`, cast, `as const`, `ts-ignore`, `ts-expect-error`, `biome-ignore`, silent catch, unbounded map, plaintext secret, hard-coded production domain, or real password was added.
+
+### Remaining gaps
+
+AUTH-RATE-LIMIT-DISTRIBUTED-001, AUTH-REVOCATION-BROADCAST-001, AUTH-RESOLVE-WATCH-GAP-001, AUTH-RESET-TIMING-001, AUTH-PEPPER-001, AUTH-BREACHED-PASSWORD-001, AUTH-EMAIL-DELIVERY-001, AUTH-EMAIL-IDN-001, AUTH-PROXY-001, AUTH-ENUMERATION-001, AUTH-GAME-ACCESS-001, PERSIST-MIGRATION-SCHEMA-001, and the product questions in changelog section 20 (answered by Batch 10.1).
+
+## PHASE 1 / BATCH 10.1 — ACCOUNT POLICY DECISIONS + SECURITY BASELINE
+
+Owner decisions (2026-09-29) answering AUTH-PRODUCT-001 to 007; changelog section 21. Batch 10 and 10.1 are uncommitted and pending review; HEAD stays `21362ceeaceab27dd5aaaca90b5deb86ea2dd4d2`. No remote, no push, no ZIP. Unchanged: Argon2id and its parameters (v19, 64 MiB, 3 passes, 4 lanes, 16-byte salt, 32-byte output), the session architecture (opaque tokens, digest storage, secure cookie, logout, logout-all, revocation, rotation after a password change), the WebSocket session resolver, and every open gap.
+
+### Decisions
+
+- **Email mandatory** for every registered account (AUTH-EMAIL-REQUIRED-001); already enforced. A future guest mode is separate.
+- **Username fixed** in the first release; no rename endpoint (AUTH-USERNAME-RENAME-001, DEFERRED, with the conditions a future rename policy must meet).
+- **Display name** separate from the username is a future Profile / Public Identity requirement (AUTH-DISPLAY-NAME-001); not added.
+- **Minors:** not supported and not claimed; no birth date or guardian data collected (AUTH-AGE-GUARDIAN-001, OPEN).
+- **Verified email:** not needed to register or sign in; future high-trust features (rated play, rated tournaments, economy or value features) will require it (AUTH-EMAIL-VERIFIED-001). No enforcement is invented in systems that do not exist; `emailVerified` stays on the profile, the login account, and `auth_user.v1`.
+- **Registration enumeration:** username disclosure accepted; the email answer is the bare code `EMAIL_UNAVAILABLE`, but email enumeration is not solved and AUTH-ENUMERATION-001 stays open until the production email verification and delivery flow. No cosmetic masking.
+
+### Password minimum 12 → 15 (AUTH-PASSWORD-002)
+
+`PASSWORD_POLICY.minLength` is 15 (`domain/identity/src/password-policy.ts`); the maximum stays 256 and every other rule is unchanged. The error response is unchanged in shape (`VALIDATION_FAILED`, `field`, `reason: too_short`); catalog section 12.2 now states the bounds. Tests: TST-AUTH-ID-007 (14 refused, 15 accepted, 256 accepted, 257 refused, a 256-character spaced passphrase accepted and 257 refused, leading spaces counted), TST-AUTH-ID-008 (14 and 15 emoji), TST-AUTH-ID-009 (identifier match now uses a 16-character username, since a shorter one is refused as too short first), TST-AUTH-REG-004 (screened password lengthened to 16), new TST-AUTH-REG-005 (registration: 14 and 257 refused with nothing stored; 15, 256, and a spaced passphrase registered), TST-AUTH-HTTP-012 (14 and 257 are 400, 15 is 201, and the email-taken body is exactly the code). All other fixture passwords were already at least 15.
+
+### `repository.ts` review (PERSIST-ACCOUNTS-REPOSITORY-001)
+
+Extracted without behaviour change: `store-error.ts` (48 lines: `AccountsStoreError`, `MalformedRow`, SQLSTATE and constraint-name extraction) and `rows.ts` (107 lines: epoch milliseconds, id, status, flag, and canonical-form checks; session and profile row decoding). The transaction helpers (user row lock, revoke-all, capped session insert, single-use token consumption) stay with `PostgresAccountsRepository` in `repository.ts` (600 lines), because they encode the lock order every transaction relies on; splitting the class by table would scatter one transaction across files. The package's public exports are unchanged.
+
+### Files changed in 10.1
+
+`domain/identity/src/password-policy.ts`; `server/accounts-persistence/src/repository.ts`, `index.ts`, new `rows.ts` and `store-error.ts`; `tests/accounts/identity.test.ts`, `accounts.test.ts`, `http.test.ts`; `PHASE_0_DECISION_CHANGELOG.md`, `CONTRACT_CATALOG_V1.md`, `PHASE_1_IMPLEMENTATION_LOG.md`, `TRACEABILITY_MATRIX_V2.md`, and the v6 status line.
+
+### Gates
+
+typecheck, lint, format:check, check:boundaries (216 files), test, test:rules, check, audit, test:db, test:realtime, and test:auth all pass (exit 0). Normal suite 57 files, 693 passed (accounts 101); `test:rules` 291; `test:auth` 8 files, 121 passed; `test:db` 4 files, 38 passed; `test:realtime` 9 files, 100 passed. 0 failed, 0 skipped, 0 blocked, 0 todo. Audit: no known vulnerabilities. No dependency, cast, `as const`, suppression, or `any` added.
+
+### Remaining gaps
+
+AUTH-RATE-LIMIT-DISTRIBUTED-001, AUTH-PROXY-001, AUTH-REVOCATION-BROADCAST-001, AUTH-RESOLVE-WATCH-GAP-001, AUTH-RESET-TIMING-001, AUTH-PEPPER-001, AUTH-BREACHED-PASSWORD-001, AUTH-EMAIL-DELIVERY-001, AUTH-EMAIL-IDN-001, AUTH-ENUMERATION-001 (email), AUTH-GAME-ACCESS-001, PERSIST-MIGRATION-SCHEMA-001, AUTH-AGE-GUARDIAN-001; deferred AUTH-USERNAME-RENAME-001; future requirement AUTH-DISPLAY-NAME-001.

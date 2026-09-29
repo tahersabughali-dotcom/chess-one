@@ -95,21 +95,65 @@ const DOMAIN_POLICIES: readonly DomainPolicy[] = [
   },
   {
     srcRoot: "server/edge/src/",
-    allowedPackages: ["@chess-one/live-game-runtime", "fastify", "ws", "node:http", "node:stream"],
-    allowedDependencies: ["@chess-one/live-game-runtime", "fastify", "ws"],
+    allowedPackages: [
+      "@chess-one/live-game-runtime",
+      "@chess-one/accounts",
+      "fastify",
+      "ws",
+      "node:http",
+      "node:stream",
+    ],
+    allowedDependencies: ["@chess-one/live-game-runtime", "@chess-one/accounts", "fastify", "ws"],
     ambientGrants: [{ names: EDGE_AMBIENT }],
     transport: true,
+  },
+  /**
+   * Identity is pure values and policies. The accounts application uses
+   * `node:crypto` for hashing, tokens, and ids, reads the wall clock in one
+   * file, and encodes hash bytes in another; it knows no HTTP, database, or
+   * game. Its adapter formats wall time for the store in one file.
+   */
+  { srcRoot: "domain/identity/src/", allowedPackages: [], allowedDependencies: [] },
+  {
+    srcRoot: "server/accounts/src/",
+    allowedPackages: ["@chess-one/identity", "node:crypto"],
+    allowedDependencies: ["@chess-one/identity"],
+    ambientGrants: [
+      { file: "server/accounts/src/system.ts", names: ["Date.now"] },
+      { file: "server/accounts/src/password-hasher.ts", names: ["Buffer"] },
+    ],
+  },
+  {
+    srcRoot: "server/accounts-persistence/src/",
+    allowedPackages: [
+      "@chess-one/identity",
+      "@chess-one/accounts",
+      "kysely",
+      "kysely/migration",
+      "pg",
+      "node:fs/promises",
+      "node:path",
+    ],
+    allowedDependencies: ["@chess-one/identity", "@chess-one/accounts", "kysely", "pg"],
+    ambientGrants: [{ file: "server/accounts-persistence/src/wall-time.ts", names: ["Date"] }],
   },
 ];
 
 /** Database access stays on the server: clients never reach the store or its drivers. */
-const CLIENT_FORBIDDEN_PACKAGES = ["kysely", "pg", "pg-", "@chess-one/live-game-persistence"];
+const CLIENT_FORBIDDEN_PACKAGES = [
+  "kysely",
+  "pg",
+  "pg-",
+  "@chess-one/live-game-persistence",
+  "@chess-one/accounts-persistence",
+];
 
 /** Clients talk to the server over the wire protocol only, never through its code. */
 const CLIENT_FORBIDDEN_SERVER_PACKAGES = [
   "@chess-one/live-game",
   "@chess-one/live-game-runtime",
   "@chess-one/edge",
+  "@chess-one/accounts",
   "fastify",
   "@fastify/",
 ];

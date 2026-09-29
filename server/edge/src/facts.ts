@@ -22,7 +22,11 @@ export type CloseReason =
   | "slow_consumer"
   | "dead_connection"
   | "message_too_large"
-  | "socket_error";
+  | "socket_error"
+  | "session_ended"
+  | "session_unverifiable";
+
+export type AuthRefusal = "origin" | "fetch_site" | "media_type" | "malformed_cookie";
 
 /** Transport facts: codes and ids only, never credentials, leases, or payloads. */
 export type EdgeFact =
@@ -43,4 +47,5 @@ export type EdgeFact =
   | { readonly name: "recovery_required_sent"; readonly gameId: GameId }
   | { readonly name: "server_busy"; readonly code: BusyCode }
   | { readonly name: "command_submitted"; readonly gameId: GameId }
-  | { readonly name: "sequence_regression_suppressed"; readonly gameId: GameId };
+  | { readonly name: "sequence_regression_suppressed"; readonly gameId: GameId }
+  | { readonly name: "auth_request_refused"; readonly reason: AuthRefusal };

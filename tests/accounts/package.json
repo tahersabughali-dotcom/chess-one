@@ -1,0 +1,21 @@
+{
+  "name": "@chess-one/tests-accounts",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "@chess-one/accounts": "workspace:*",
+    "@chess-one/accounts-persistence": "workspace:*",
+    "@chess-one/chess-rules": "workspace:*",
+    "@chess-one/edge": "workspace:*",
+    "@chess-one/game-values": "workspace:*",
+    "@chess-one/identity": "workspace:*",
+    "@chess-one/live-game": "workspace:*",
+    "@chess-one/live-game-persistence": "workspace:*",
+    "@chess-one/live-game-runtime": "workspace:*",
+    "@types/ws": "8.18.1",
+    "kysely": "0.29.6",
+    "pg": "8.23.0",
+    "ws": "8.22.0"
+  }
+}

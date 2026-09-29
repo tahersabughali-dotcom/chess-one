@@ -1,4 +1,10 @@
+import type { AccountsApi } from "@chess-one/accounts";
 import type { FactSink, MonotonicClock, WriterDirectory } from "@chess-one/live-game-runtime";
+import {
+  type SessionCookieMode,
+  type SessionCookiePolicy,
+  sessionCookiePolicy,
+} from "./auth/cookie.ts";
 import type { EdgeFact } from "./facts.ts";
 import type { TrustedSessionResolver } from "./session.ts";
 
@@ -24,6 +30,13 @@ export interface EdgeLimits {
   readonly maxGamesPerConnection: number;
   readonly maxCredentialLength: number;
   readonly maxGrantsPerSession: number;
+  /**
+   * How often an open connection rechecks its session in the store. An end
+   * made in this process closes the connection at once; this bounds how long
+   * one made elsewhere (another process, a direct store change) can go
+   * unnoticed.
+   */
+  readonly sessionRecheckIntervalMs: number;
 }
 
 /**
@@ -45,6 +58,7 @@ export const DEFAULT_EDGE_LIMITS: EdgeLimits = Object.freeze({
   maxGamesPerConnection: 8,
   maxCredentialLength: 4_096,
   maxGrantsPerSession: 64,
+  sessionRecheckIntervalMs: 60_000,
 });
 
 /** No limit may exceed these: the message cap stays at or under 16 KiB. */
@@ -63,7 +77,15 @@ const LIMIT_CEILINGS: Readonly<Record<keyof EdgeLimits, number>> = {
   maxGamesPerConnection: 64,
   maxCredentialLength: 16_384,
   maxGrantsPerSession: 1_024,
+  sessionRecheckIntervalMs: 3_600_000,
 };
+
+/** The HTTP auth routes. Absent: the edge serves no `/auth` routes. */
+export interface EdgeAuthConfig {
+  readonly accounts: AccountsApi;
+  /** `insecure_loopback` exists for plain-HTTP tests and is refused in production. */
+  readonly cookie: SessionCookieMode;
+}
 
 export interface EdgeConfig {
   readonly environment: "production" | "test";
@@ -76,10 +98,18 @@ export interface EdgeConfig {
   readonly facts: FactSink<EdgeFact>;
   readonly reportDefect: (error: unknown) => void;
   readonly limits?: Partial<EdgeLimits>;
+  readonly auth?: EdgeAuthConfig;
+}
+
+export interface ResolvedEdgeAuth {
+  readonly accounts: AccountsApi;
+  readonly cookie: SessionCookiePolicy;
 }
 
 export interface ResolvedEdgeConfig {
+  readonly environment: "production" | "test";
   readonly allowedOrigins: ReadonlySet<string>;
+  readonly auth: ResolvedEdgeAuth | null;
   readonly sessionResolver: TrustedSessionResolver;
   readonly writers: WriterDirectory;
   readonly clock: MonotonicClock;
@@ -125,10 +155,20 @@ function checkLimits(overrides: Partial<EdgeLimits> | undefined): EdgeLimits {
   return Object.freeze(limits);
 }
 
+function resolveAuth(config: EdgeConfig): ResolvedEdgeAuth | null {
+  const { auth } = config;
+  if (auth === undefined) return null;
+  if (config.environment === "production" && auth.cookie !== "secure") {
+    throw new EdgeConfigError("A production endpoint needs Secure session cookies");
+  }
+  return Object.freeze({ accounts: auth.accounts, cookie: sessionCookiePolicy(auth.cookie) });
+}
+
 /**
  * Fails closed: no endpoint starts without a session resolver, with a
  * test-only resolver in production, with an empty origin allowlist, with a
- * wildcard or malformed origin, or with limits out of range.
+ * wildcard or malformed origin, with limits out of range, or with insecure
+ * session cookies in production.
  */
 export function resolveEdgeConfig(config: EdgeConfig): ResolvedEdgeConfig {
   const resolver = config.sessionResolver;
@@ -143,7 +183,9 @@ export function resolveEdgeConfig(config: EdgeConfig): ResolvedEdgeConfig {
     config.allowedOrigins.map((origin) => checkOrigin(origin, config.environment)),
   );
   return Object.freeze({
+    environment: config.environment,
     allowedOrigins: origins,
+    auth: resolveAuth(config),
     sessionResolver: resolver,
     writers: config.writers,
     clock: config.clock,

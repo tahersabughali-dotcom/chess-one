@@ -97,6 +97,9 @@ export class RealtimeConnection {
   #handshakeTimer: ReturnType<typeof setTimeout> | null;
   #heartbeatTimer: ReturnType<typeof setInterval> | null;
   #closeTimer: ReturnType<typeof setTimeout> | null = null;
+  #recheckTimer: ReturnType<typeof setInterval> | null = null;
+  #rechecking = false;
+  #unwatch: (() => void) | null = null;
 
   constructor(options: ConnectionOptions) {
     this.id = options.id;
@@ -120,6 +123,11 @@ export class RealtimeConnection {
       if (this.#state === "awaiting_hello") this.close(CLOSE_POLICY_VIOLATION, "hello_timeout");
     }, limits.handshakeTimeoutMs);
     this.#heartbeatTimer = setInterval(this.#heartbeat, limits.heartbeatIntervalMs);
+    const { liveness } = options.session;
+    if (liveness !== undefined) {
+      this.#unwatch = liveness.watch(() => this.close(CLOSE_POLICY_VIOLATION, "session_ended"));
+      this.#recheckTimer = setInterval(this.#recheck, limits.sessionRecheckIntervalMs);
+    }
   }
 
   get subscriptionCount(): number {
@@ -209,11 +217,39 @@ export class RealtimeConnection {
     this.#socket.ping();
   };
 
+  /**
+   * The periodic session recheck. It runs beside message handling, never in
+   * front of it. A session that ended, or a store that cannot answer, closes
+   * the connection with 1008: the session is not trusted on a guess.
+   */
+  readonly #recheck = (): void => {
+    const liveness = this.#session.liveness;
+    if (liveness === undefined || this.#rechecking) return;
+    if (this.#state === "closing" || this.#state === "closed") return;
+    this.#rechecking = true;
+    liveness.check().then(
+      (active) => {
+        this.#rechecking = false;
+        if (!active) this.close(CLOSE_POLICY_VIOLATION, "session_ended");
+      },
+      (error: unknown) => {
+        this.#rechecking = false;
+        this.#config.reportDefect(error);
+        this.close(CLOSE_POLICY_VIOLATION, "session_unverifiable");
+      },
+    );
+  };
+
   #stopTimers(): void {
     if (this.#handshakeTimer !== null) clearTimeout(this.#handshakeTimer);
     if (this.#heartbeatTimer !== null) clearInterval(this.#heartbeatTimer);
+    if (this.#recheckTimer !== null) clearInterval(this.#recheckTimer);
     this.#handshakeTimer = null;
     this.#heartbeatTimer = null;
+    this.#recheckTimer = null;
+    const unwatch = this.#unwatch;
+    this.#unwatch = null;
+    if (unwatch !== null) unwatch();
   }
 
   #releaseSubscriptions(): void {
