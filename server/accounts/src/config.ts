@@ -164,6 +164,6 @@ export function resolveAccountsConfig(config: AccountsConfig): AccountsContext {
     sessions: checkSessions(config.sessions),
     tokens: checkTokens(config.tokens),
     limiters: limiters(config.rateLimits),
-    revocations: new SessionRevocations(),
+    revocations: new SessionRevocations(config.reportDefect),
   });
 }

@@ -1,4 +1,4 @@
-import type { GameId, ResponseCode } from "@chess-one/live-game";
+import type { GameId, ResponseCode, Seat } from "@chess-one/live-game";
 import type { InfrastructureReason } from "./writer-recovery.ts";
 
 /**
@@ -41,12 +41,17 @@ export type RuntimeFact =
       readonly reason: InfrastructureReason;
     }
   | { readonly name: "command_refused_paused"; readonly gameId: GameId }
+  /** A command under a lease that is not the seat's: refused before receipt or, cold, before the core. */
+  | { readonly name: "command_refused_control"; readonly gameId: GameId }
+  | { readonly name: "control_lease_rotated"; readonly gameId: GameId; readonly seat: Seat }
+  /** A historical replay whose command id is bound to a different command: nothing returned. */
+  | { readonly name: "replay_identity_conflict"; readonly gameId: GameId }
   | { readonly name: "deadline_flagged"; readonly gameId: GameId }
   | {
       /** An unexpected exception inside the writer; the error itself goes to `reportDefect` only. */
       readonly name: "writer_fault";
       readonly gameId: GameId;
-      readonly job: "command" | "sync" | "deadline" | "none";
+      readonly job: "command" | "sync" | "deadline" | "lease" | "replay" | "none";
     }
   | { readonly name: "subscriber_defect"; readonly gameId: GameId };
 

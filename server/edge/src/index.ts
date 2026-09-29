@@ -11,8 +11,6 @@ export {
 } from "./auth/cookie.ts";
 export { AUTH_BODY_LIMIT, AUTH_JSON_LIMITS, AUTH_PREFIX } from "./auth/routes.ts";
 export {
-  type GameAccessResolver,
-  NO_GAME_ACCESS,
   type ProductionSessionResolverOptions,
   ProductionTrustedSessionResolver,
 } from "./auth/session-resolver.ts";
@@ -48,6 +46,7 @@ export {
 export type { AuthRefusal, CloseReason, EdgeFact, UpgradeRejection } from "./facts.ts";
 export {
   CLIENT_JSON_LIMITS,
+  type ClientCommand,
   type ClientMessage,
   type DecodeResult,
   decodeClientMessage,
@@ -59,6 +58,8 @@ export {
   type BusyCode,
   type ClockWire,
   type CommandResponseWire,
+  type ControlDeniedCode,
+  type ControlRevokedCode,
   encodeCommandResponse,
   encodeSnapshot,
   encodeStatus,
@@ -76,7 +77,6 @@ export {
   parseStrictJson,
 } from "./protocol/strict-json.ts";
 export type {
-  GameSeatGrant,
   SessionCredentials,
   SessionLiveness,
   TrustedSessionContext,

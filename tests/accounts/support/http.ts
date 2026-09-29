@@ -1,14 +1,14 @@
+import type { AuthenticatedSession } from "@chess-one/accounts";
 import {
   createRealtimeEdge,
   type EdgeFact,
   type EdgeLimits,
-  type GameAccessResolver,
-  type GameSeatGrant,
   LOOPBACK_SESSION_COOKIE,
   ProductionTrustedSessionResolver,
   type RealtimeEdge,
   sessionCookiePolicy,
 } from "@chess-one/edge";
+import type { GameAccessProvider, SeatListing, SessionGameAuthority } from "@chess-one/game-access";
 import { type ActiveGameState, createActiveGame, type Seat } from "@chess-one/live-game";
 import { isPlayerId, type PlayerId } from "@chess-one/live-game-runtime";
 import {
@@ -22,6 +22,7 @@ import {
 import { field, ORIGIN } from "../../realtime/support/client.ts";
 import { DefectLog, RecordingFacts } from "../../realtime/support/facts.ts";
 import { type RuntimeHarness, runtimeHarness } from "../../realtime/support/runtime.ts";
+import { type StaticSeat, staticAuthority } from "../../realtime/support/static-access.ts";
 import { ManualClock } from "../../realtime/support/time.ts";
 import { type AccountsHarness, type AccountsHarnessOptions, accountsHarness } from "./harness.ts";
 
@@ -43,13 +44,17 @@ export function seatedGame(white: string, black: string): ActiveGameState {
   return created.value;
 }
 
-/** TEST ADAPTER: seats assigned by the test, standing in for a future matchmaking service. */
-export class TestGameAccess implements GameAccessResolver {
+/**
+ * TEST ADAPTER: seats assigned by the test, each session always holding
+ * control under the game's stored lease. It is for tests of authentication;
+ * seat control itself is tested over the real game access.
+ */
+export class TestGameAccess implements GameAccessProvider {
   readonly trust = "test_only";
-  readonly #grants = new Map<string, GameSeatGrant[]>();
+  readonly #seats = new Map<string, StaticSeat[]>();
 
-  assign(playerId: string, grant: GameSeatGrant): void {
-    this.#grants.set(playerId, [...(this.#grants.get(playerId) ?? []), grant]);
+  assign(playerId: string, seat: StaticSeat): void {
+    this.#seats.set(playerId, [...(this.#seats.get(playerId) ?? []), seat]);
   }
 
   /** Gives the account playing `seat` in `state` that seat and its control lease. */
@@ -61,8 +66,12 @@ export class TestGameAccess implements GameAccessResolver {
     });
   }
 
-  async grantsFor(playerId: PlayerId): Promise<readonly GameSeatGrant[]> {
-    return this.#grants.get(playerId) ?? [];
+  async seatsOf(playerId: PlayerId): Promise<readonly SeatListing[]> {
+    return (this.#seats.get(playerId) ?? []).map(({ gameId, seat }) => ({ gameId, seat }));
+  }
+
+  forSession(_session: AuthenticatedSession, playerId: PlayerId): SessionGameAuthority {
+    return staticAuthority(this.#seats.get(playerId) ?? []);
   }
 }
 

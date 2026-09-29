@@ -1,5 +1,7 @@
 import type { AccountStatus, UserId } from "@chess-one/identity";
 import type {
+  AccountDirectory,
+  AccountStanding,
   AccountsApi,
   AccountView,
   AuthenticatedSession,
@@ -17,6 +19,7 @@ import type {
 } from "./api.ts";
 import { type AccountsConfig, type AccountsContext, resolveAccountsConfig } from "./config.ts";
 import { changePassword, login, register } from "./credentials.ts";
+import type { SessionEndListener } from "./extensions.ts";
 import {
   confirmEmailVerification,
   requestEmailVerification,
@@ -38,7 +41,7 @@ import {
  * The accounts application: registration, login, sessions, and recovery over
  * an `AccountsRepository`. It knows nothing of HTTP, cookies, or games.
  */
-export class Accounts implements AccountsApi {
+export class Accounts implements AccountsApi, AccountDirectory {
   readonly #context: AccountsContext;
 
   constructor(config: AccountsConfig) {
@@ -145,8 +148,23 @@ export class Accounts implements AccountsApi {
     if (revoked === null) return false;
     context.facts.record({ name: "account_status_changed", userId, status });
     announceRevoked(context, userId, revoked, "account_disabled");
-    if (status !== "active") context.revocations.userEnded(userId);
+    if (status !== "active") context.revocations.userEnded(userId, status);
     return true;
+  }
+
+  /**
+   * Standing of an account for trusted server use cases (game assignment):
+   * its status and whether its email address is verified. Never exposed over
+   * HTTP; null for an unknown user id.
+   */
+  async accountStanding(userId: UserId): Promise<AccountStanding | null> {
+    const profile = await this.#context.repository.getProfile(userId);
+    if (profile === null) return null;
+    return Object.freeze({ status: profile.status, emailVerified: profile.emailVerified });
+  }
+
+  onSessionsEnded(listener: SessionEndListener): () => void {
+    return this.#context.revocations.listen(listener);
   }
 
   /**

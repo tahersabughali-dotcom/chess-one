@@ -1,0 +1,14 @@
+{
+  "name": "@chess-one/game-access",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@chess-one/accounts": "workspace:*",
+    "@chess-one/identity": "workspace:*",
+    "@chess-one/live-game-runtime": "workspace:*"
+  }
+}

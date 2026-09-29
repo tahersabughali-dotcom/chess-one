@@ -63,6 +63,9 @@ export type CommitError = ConcurrencyConflict | PersistenceFailure;
  * - `transition`: a committed transition. The state row moves from
  *   `expectedSequence` to `state.sequence` (one more), with its binding, if
  *   any, and its events, in the same transaction.
+ * - `control`: a control-lease rotation. Only `controlLeases` differs; the
+ *   stored sequence must still be `expectedSequence`, and the stored clock
+ *   domain is kept, so a rotation never re-anchors a paused clock.
  */
 export type CommitPlan =
   | {
@@ -80,6 +83,12 @@ export type CommitPlan =
       readonly binding: CommandBinding | null;
       readonly bindingOrdinal: number;
       readonly events: readonly GameFinishedV1[];
+    }
+  | {
+      readonly kind: "control";
+      readonly gameId: GameId;
+      readonly expectedSequence: GameSequence;
+      readonly state: ActiveGameState;
     };
 
 export interface CommitReceipt {
@@ -107,12 +116,16 @@ function planDefect(message: string): never {
   throw new Error(`Live game persistence defect: ${message}`);
 }
 
-/** Every own field other than the bindings is the same value, including fields added later. */
-function unchangedExceptBindings(previous: ActiveGameState, next: ActiveGameState): boolean {
+/** Every own field other than `field` is the same value, including fields added later. */
+function unchangedExcept(
+  previous: ActiveGameState,
+  next: ActiveGameState,
+  field: "commandBindings" | "controlLeases",
+): boolean {
   const before = new Map(Object.entries(previous));
   const after = new Map(Object.entries(next));
   const names = new Set([...before.keys(), ...after.keys()]);
-  names.delete("commandBindings");
+  names.delete(field);
   return [...names].every((name) => before.get(name) === after.get(name));
 }
 
@@ -151,13 +164,23 @@ export function planCommit(
   const binding = after[before.length] ?? null;
   const common = { gameId: previous.gameId, expectedSequence: previous.sequence };
   if (next.sequence === previous.sequence) {
-    if (!unchangedExceptBindings(previous, next) || binding === null || events.length > 0) {
+    if (
+      !unchangedExcept(previous, next, "commandBindings") ||
+      binding === null ||
+      events.length > 0
+    ) {
       planDefect("a change without a sequence step");
     }
     return { kind: "bind_only", ...common, binding, bindingOrdinal: before.length };
   }
   if (next.sequence !== previous.sequence + 1) planDefect("the sequence moves by one");
   if (!sameGame(previous, next)) planDefect("a transition changed the game identity");
+  if (
+    next.controlLeases.white !== previous.controlLeases.white ||
+    next.controlLeases.black !== previous.controlLeases.black
+  ) {
+    planDefect("a decision changed a control lease");
+  }
   if (events.some((event) => event.gameSequence !== next.sequence)) {
     planDefect("an event of another sequence");
   }
@@ -168,5 +191,29 @@ export function planCommit(
     binding,
     bindingOrdinal: before.length,
     events,
+  };
+}
+
+/**
+ * The write of a control-lease rotation. Decisions never change a lease
+ * (`planCommit` refuses it as a defect); only this plan does, and it
+ * changes nothing else.
+ */
+export function planLeaseRotation(previous: ActiveGameState, next: ActiveGameState): CommitPlan {
+  if (next.sequence !== previous.sequence) planDefect("a rotation moved the sequence");
+  if (next.commandBindings !== previous.commandBindings) planDefect("a rotation changed bindings");
+  if (!unchangedExcept(previous, next, "controlLeases")) {
+    planDefect("a rotation changed more than the leases");
+  }
+  const { white, black } = next.controlLeases;
+  if (white === black) planDefect("a rotation shares one lease between seats");
+  if (white === previous.controlLeases.white && black === previous.controlLeases.black) {
+    planDefect("a rotation changed no lease");
+  }
+  return {
+    kind: "control",
+    gameId: previous.gameId,
+    expectedSequence: previous.sequence,
+    state: next,
   };
 }

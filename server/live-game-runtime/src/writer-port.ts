@@ -1,9 +1,13 @@
 import type {
   AuthorizedGameActor,
   CommandResponse,
+  ControlLeaseId,
   GameId,
+  GameParticipant,
+  LeaselessCommand,
   LiveGameCommand,
   MonotonicMs,
+  Seat,
 } from "@chess-one/live-game";
 import type { GameView } from "./game-view.ts";
 import type { InfrastructureReason, RecoveryReason } from "./writer-recovery.ts";
@@ -20,10 +24,18 @@ export interface WriterLimits {
  * Authoritative receipt (DEC-063): a command is received only when the writer
  * accepts it into its bounded queue, and `receivedAt` is the writer's
  * monotonic reading at that moment. A refused command was never received.
+ *
+ * Admission (Batch 11): the lease check is part of receipt. A command whose
+ * lease is not the seat's lease as of the end of the queue (the stored lease
+ * with every queued rotation applied) is refused `control_not_held` before
+ * it is stamped. So a rotation is the linearization point of a control
+ * change: every command admitted before it ran under the old lease, and
+ * none is admitted under that lease after it.
  */
 export type CommandIngress =
   | { readonly accepted: true; readonly receivedAt: MonotonicMs }
-  | IngressRefused;
+  | IngressRefused
+  | ControlNotHeld;
 
 export type SyncIngress = { readonly accepted: true } | IngressRefused;
 
@@ -35,6 +47,12 @@ export type IngressRefused =
       readonly reason: "infrastructure_paused";
       readonly recovery: InfrastructureReason;
     };
+
+/** The actor's lease is not the seat's lease: nothing was received, queued, stamped, or bound. */
+export interface ControlNotHeld {
+  readonly accepted: false;
+  readonly reason: "control_not_held";
+}
 
 /**
  * - `temporarily_unavailable`: nothing was decided durably; the same command
@@ -57,7 +75,35 @@ export interface RecoveryRequired {
 
 export type CommandOutcome =
   /** A durable decision: committed, or deciding nothing that needed a write. */
-  { readonly kind: "decided"; readonly response: CommandResponse } | RecoveryRequired | Unavailable;
+  | { readonly kind: "decided"; readonly response: CommandResponse }
+  /**
+   * Only a writer that had not loaded the game admits a command before it
+   * knows the lease; the job then checks it first, before the core sees the
+   * command, and discards the provisional stamp. Nothing is decided or bound.
+   */
+  | { readonly kind: "control_not_held" }
+  | RecoveryRequired
+  | Unavailable;
+
+/**
+ * A control-lease rotation: `applied` once the lease is stored (or already
+ * was). The seat's previous lease admits no command after the rotation was
+ * accepted into the queue.
+ */
+export type LeaseOutcome = { readonly kind: "applied" } | RecoveryRequired | Unavailable;
+
+/**
+ * A historical replay, read from the stored bindings; it never decides a
+ * command. `control_not_held`: the seat never bound the command id, so there
+ * is nothing to replay and the caller has no authority to decide it.
+ * `identity_conflict`: the id is bound to a different command.
+ */
+export type ReplayOutcome =
+  | { readonly kind: "decided"; readonly response: CommandResponse }
+  | { readonly kind: "control_not_held" }
+  | { readonly kind: "identity_conflict" }
+  | RecoveryRequired
+  | Unavailable;
 
 /** `recovery_required` answers a sync whose load failed and paused the game. */
 export type SyncOutcome =
@@ -122,4 +168,27 @@ export interface GameWriterPort {
     reply: (outcome: CommandOutcome) => void,
   ): CommandIngress;
   requestSync(reply: (outcome: SyncOutcome) => void): SyncIngress;
+  /**
+   * Looks up the stored decision of a command the participant's seat already
+   * bound, for a session without the seat's control. No lease is taken: the
+   * binding's own lease is used. Read-only: nothing is received or stamped.
+   */
+  replayCommand(
+    participant: GameParticipant,
+    command: LeaselessCommand,
+    reply: (outcome: ReplayOutcome) => void,
+  ): SyncIngress;
+}
+
+/**
+ * What the game-access layer may ask of a writer beyond a transport: make a
+ * lease the seat's lease. It may answer before returning when the lease is
+ * already the seat's lease with no rotation queued.
+ */
+export interface GameControlPort extends GameWriterPort {
+  applyControlLease(
+    seat: Seat,
+    lease: ControlLeaseId,
+    reply: (outcome: LeaseOutcome) => void,
+  ): SyncIngress;
 }

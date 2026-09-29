@@ -2,17 +2,24 @@ import { err } from "@chess-one/game-values";
 import {
   type ActiveGameState,
   type AuthorizedGameActor,
+  type ControlLeaseId,
   type ExecutionError,
   executeCommand,
   executeDeadline,
+  executeLeaseRotation,
   type GameId,
+  type GameParticipant,
   gameCondition,
+  historicalReplay,
+  type LeaselessCommand,
+  type LeaseRotationFailure,
   type LiveGameCommand,
   type LiveGameRepository,
   type LiveGameWriter,
   type LoadError,
   loadForWriter,
   type MonotonicMs,
+  type Seat,
 } from "@chess-one/live-game";
 import { BoundedQueue } from "./bounded-queue.ts";
 import type { MonotonicClock, WakeHandle, WakeScheduler } from "./clock.ts";
@@ -24,10 +31,13 @@ import {
   activationOf,
   type CommandIngress,
   type CommandOutcome,
+  type ControlNotHeld,
+  type GameControlPort,
   type GameSubscriber,
-  type GameWriterPort,
   type IngressRefused,
+  type LeaseOutcome,
   type RecoveryRequired,
+  type ReplayOutcome,
   type SubscribeResult,
   type SyncIngress,
   type SyncOutcome,
@@ -53,7 +63,19 @@ type Job =
       readonly reply: (outcome: CommandOutcome) => void;
     }
   | { readonly kind: "sync"; readonly reply: (outcome: SyncOutcome) => void }
-  | { readonly kind: "deadline"; readonly observedAt: MonotonicMs };
+  | { readonly kind: "deadline"; readonly observedAt: MonotonicMs }
+  | {
+      readonly kind: "lease";
+      readonly seat: Seat;
+      readonly lease: ControlLeaseId;
+      readonly reply: (outcome: LeaseOutcome) => void;
+    }
+  | {
+      readonly kind: "replay";
+      readonly participant: GameParticipant;
+      readonly command: LeaselessCommand;
+      readonly reply: (outcome: ReplayOutcome) => void;
+    };
 
 export interface WriterRuntimeOptions {
   readonly gameId: GameId;
@@ -71,6 +93,17 @@ export interface WriterRuntimeOptions {
 
 const QUEUE_FULL: IngressRefused = Object.freeze({ accepted: false, reason: "queue_full" });
 const STOPPED: IngressRefused = Object.freeze({ accepted: false, reason: "writer_stopped" });
+const CONTROL_NOT_HELD: ControlNotHeld = Object.freeze({
+  accepted: false,
+  reason: "control_not_held",
+});
+const NOT_HELD_OUTCOME: { readonly kind: "control_not_held" } = Object.freeze({
+  kind: "control_not_held",
+});
+const IDENTITY_CONFLICT_OUTCOME: { readonly kind: "identity_conflict" } = Object.freeze({
+  kind: "identity_conflict",
+});
+const APPLIED: LeaseOutcome = Object.freeze({ kind: "applied" });
 const SYNC_ACCEPTED: SyncIngress = Object.freeze({ accepted: true });
 
 function unavailable(reason: UnavailableReason): Unavailable {
@@ -95,7 +128,7 @@ function once<T>(reply: (outcome: T) => void): (outcome: T) => void {
  * from the repository for every job; the writer keeps only the last sequence
  * it published and the condition it last observed.
  */
-export class GameWriterRuntime implements GameWriterPort {
+export class GameWriterRuntime implements GameControlPort {
   readonly gameId: GameId;
   readonly #writer: LiveGameWriter;
   readonly #clock: MonotonicClock;
@@ -124,6 +157,13 @@ export class GameWriterRuntime implements GameWriterPort {
   #lastLoaded = -1;
   #lastLoadFailure: Unavailable | RecoveryRequired = unavailable("temporarily_unavailable");
   #idleTimer: WakeHandle | null = null;
+  /** The seats' leases as this writer last loaded or committed them; null before the first load. */
+  #leases: Readonly<Record<Seat, ControlLeaseId>> | null = null;
+  /** Rotations waiting in the queue, per seat (at most two keys), and the lease the last one sets. */
+  readonly #queuedRotations = new Map<
+    Seat,
+    { readonly lease: ControlLeaseId; readonly count: number }
+  >();
 
   constructor(options: WriterRuntimeOptions) {
     this.gameId = options.gameId;
@@ -184,7 +224,8 @@ export class GameWriterRuntime implements GameWriterPort {
   /**
    * While play is paused a command is refused before it is stamped: it is
    * not received, reaches no queue, touches no repository, and its command id
-   * stays unbound.
+   * stays unbound. So is a command whose lease is not the seat's lease as of
+   * the end of the queue (see `CommandIngress`).
    */
   submitCommand(
     actor: AuthorizedGameActor,
@@ -201,6 +242,10 @@ export class GameWriterRuntime implements GameWriterPort {
         recovery: this.#condition.reason,
       });
     }
+    if (this.#status === "active" && !this.#admits(actor, command)) {
+      this.#facts.record({ name: "command_refused_control", gameId: this.gameId });
+      return CONTROL_NOT_HELD;
+    }
     const refused = this.#refusal();
     if (refused !== null) return refused;
     const receivedAt = this.#clock.now();
@@ -213,6 +258,49 @@ export class GameWriterRuntime implements GameWriterPort {
     const refused = this.#refusal();
     if (refused !== null) return refused;
     this.#enqueue({ kind: "sync", reply: once(reply) });
+    return SYNC_ACCEPTED;
+  }
+
+  replayCommand(
+    participant: GameParticipant,
+    command: LeaselessCommand,
+    reply: (outcome: ReplayOutcome) => void,
+  ): SyncIngress {
+    if (participant.gameId !== this.gameId)
+      throw new Error("Writer runtime defect: participant of another game");
+    const refused = this.#refusal();
+    if (refused !== null) return refused;
+    this.#enqueue({ kind: "replay", participant, command, reply: once(reply) });
+    return SYNC_ACCEPTED;
+  }
+
+  /**
+   * From the moment this returns accepted, only `lease` admits commands for
+   * `seat`. A lease that is already the seat's, with no rotation queued, is
+   * answered at once, in any condition. Otherwise, while play is paused for
+   * an infrastructure failure nothing is written and the rotation is refused.
+   */
+  applyControlLease(
+    seat: Seat,
+    lease: ControlLeaseId,
+    reply: (outcome: LeaseOutcome) => void,
+  ): SyncIngress {
+    const refused = this.#refusal();
+    if (refused !== null) return refused;
+    if (!this.#queuedRotations.has(seat) && this.#leases?.[seat] === lease) {
+      reply(APPLIED);
+      return SYNC_ACCEPTED;
+    }
+    if (this.#condition?.kind === "infrastructure_paused") {
+      return Object.freeze({
+        accepted: false,
+        reason: "infrastructure_paused",
+        recovery: this.#condition.reason,
+      });
+    }
+    const queued = this.#queuedRotations.get(seat);
+    this.#queuedRotations.set(seat, { lease, count: (queued?.count ?? 0) + 1 });
+    this.#enqueue({ kind: "lease", seat, lease, reply: once(reply) });
     return SYNC_ACCEPTED;
   }
 
@@ -260,7 +348,10 @@ export class GameWriterRuntime implements GameWriterPort {
     const owned: LiveGameRepository = {
       loadGame: async (gameId) => {
         const loaded = await inner.loadGame(gameId);
-        if (loaded.ok) this.#lastLoaded = loaded.value.state.sequence;
+        if (loaded.ok) {
+          this.#lastLoaded = loaded.value.state.sequence;
+          this.#leases = loaded.value.state.controlLeases;
+        }
         return loaded;
       },
       createGame: (state, clockDomainId) => inner.createGame(state, clockDomainId),
@@ -268,7 +359,9 @@ export class GameWriterRuntime implements GameWriterPort {
         if (plan.expectedSequence !== this.#lastPublished) {
           return err({ kind: "concurrency_conflict", expectedSequence: plan.expectedSequence });
         }
-        return inner.commitDecision(plan, clockDomainId);
+        const committed = await inner.commitDecision(plan, clockDomainId);
+        if (committed.ok && plan.kind !== "bind_only") this.#leases = plan.state.controlLeases;
+        return committed;
       },
     };
     return Object.freeze(owned);
@@ -277,6 +370,24 @@ export class GameWriterRuntime implements GameWriterPort {
   /** The job in progress decided on a sequence this writer never published. */
   #foreignLoad(): boolean {
     return this.#lastLoaded !== this.#lastPublished;
+  }
+
+  /**
+   * The command's lease is the actor's, and the actor's is the seat's lease
+   * at the end of the queue. Before its first load a writer does not know
+   * the lease; the command job checks it then (`#runCommand`).
+   */
+  #admits(actor: AuthorizedGameActor, command: LiveGameCommand): boolean {
+    if (command.controlLeaseId !== actor.controlLeaseId) return false;
+    const tail = this.#queuedRotations.get(actor.seat)?.lease ?? this.#leases?.[actor.seat];
+    return tail === undefined || tail === actor.controlLeaseId;
+  }
+
+  #rotationLeft(seat: Seat): void {
+    const queued = this.#queuedRotations.get(seat);
+    if (queued === undefined) return;
+    if (queued.count <= 1) this.#queuedRotations.delete(seat);
+    else this.#queuedRotations.set(seat, { lease: queued.lease, count: queued.count - 1 });
   }
 
   #refusal(): IngressRefused | null {
@@ -335,9 +446,11 @@ export class GameWriterRuntime implements GameWriterPort {
   #release(job: Job, refuse: boolean): void {
     if (job.kind === "deadline") return;
     this.#requests -= 1;
+    if (job.kind === "lease") this.#rotationLeft(job.seat);
     if (!refuse) return;
-    if (job.kind === "command" && this.#condition?.kind === "infrastructure_paused") {
-      job.reply(this.#recoveryRequired(this.#condition.reason));
+    const paused = this.#condition?.kind === "infrastructure_paused" ? this.#condition : null;
+    if (paused !== null && job.kind !== "sync") {
+      job.reply(this.#recoveryRequired(paused.reason));
       return;
     }
     job.reply(unavailable("temporarily_unavailable"));
@@ -350,15 +463,27 @@ export class GameWriterRuntime implements GameWriterPort {
     }
     const paused = this.#condition?.kind === "infrastructure_paused" ? this.#condition : null;
     if (paused !== null) {
-      if (job.kind === "command") job.reply(this.#recoveryRequired(paused.reason));
+      if (job.kind !== "deadline") job.reply(this.#recoveryRequired(paused.reason));
       return;
     }
     if (!this.#loaded && !(await this.#refresh(null))) {
-      if (job.kind === "command") job.reply(this.#lastLoadFailure);
+      if (job.kind !== "deadline") job.reply(this.#lastLoadFailure);
       return;
     }
-    if (job.kind === "command") await this.#runCommand(job);
-    else await this.#runDeadline(job.observedAt);
+    switch (job.kind) {
+      case "command":
+        await this.#runCommand(job);
+        return;
+      case "lease":
+        await this.#runLease(job);
+        return;
+      case "replay":
+        await this.#runReplay(job);
+        return;
+      case "deadline":
+        await this.#runDeadline(job.observedAt);
+        return;
+    }
   }
 
   /**
@@ -415,6 +540,11 @@ export class GameWriterRuntime implements GameWriterPort {
   }
 
   async #runCommand(job: Extract<Job, { kind: "command" }>): Promise<void> {
+    if (this.#leases !== null && this.#leases[job.actor.seat] !== job.actor.controlLeaseId) {
+      this.#facts.record({ name: "command_refused_control", gameId: this.gameId });
+      job.reply(NOT_HELD_OUTCOME);
+      return;
+    }
     const result = await executeCommand(this.#writer, job.actor, job.command, {
       receivedAtMonotonicMs: job.receivedAt,
     });
@@ -436,6 +566,75 @@ export class GameWriterRuntime implements GameWriterPort {
       this.#facts.record({ name: "command_rejected", gameId: this.gameId, code: response.code });
     }
     this.#adopt(nextState);
+  }
+
+  async #runLease(job: Extract<Job, { kind: "lease" }>): Promise<void> {
+    const result = await executeLeaseRotation(this.#writer, this.gameId, job.seat, job.lease);
+    if (!result.ok) {
+      job.reply(this.#rotationFailed(result.error));
+      return;
+    }
+    if (this.#foreignLoad()) {
+      job.reply(this.#ownershipConflict("load"));
+      return;
+    }
+    if (result.value.changed) {
+      this.#facts.record({ name: "control_lease_rotated", gameId: this.gameId, seat: job.seat });
+    }
+    job.reply(APPLIED);
+  }
+
+  /**
+   * A rotation moves no sequence and no clock, so a commit whose outcome is
+   * unknown does not pause play: the next load shows which lease is stored,
+   * and the caller is told it may not rely on the new one.
+   */
+  #rotationFailed(error: LeaseRotationFailure): LeaseOutcome {
+    switch (error.kind) {
+      case "shared_control_lease":
+        this.#reportDefect(new Error("Writer runtime defect: a rotation reused the other lease"));
+        return unavailable("temporarily_unavailable");
+      case "concurrency_conflict":
+        return this.#ownershipConflict(this.#foreignLoad() ? "load" : "commit");
+      case "persistence_failure":
+        if (error.operation !== "commit") return this.#loadFailed(error);
+        this.#facts.record({
+          name: "persistence_failure",
+          gameId: this.gameId,
+          operation: "commit",
+        });
+        return unavailable("temporarily_unavailable");
+      case "game_not_found":
+      case "corrupt_state":
+        return this.#loadFailed(error);
+    }
+  }
+
+  async #runReplay(job: Extract<Job, { kind: "replay" }>): Promise<void> {
+    const loaded = await loadForWriter(this.#writer, this.gameId);
+    if (!loaded.ok) {
+      job.reply(this.#loadFailed(loaded.error));
+      return;
+    }
+    if (this.#foreignLoad()) {
+      job.reply(this.#ownershipConflict("load"));
+      return;
+    }
+    const replay = historicalReplay(loaded.value.state, job.participant, job.command);
+    switch (replay.kind) {
+      case "not_bound":
+        this.#facts.record({ name: "command_refused_control", gameId: this.gameId });
+        job.reply(NOT_HELD_OUTCOME);
+        return;
+      case "identity_conflict":
+        this.#facts.record({ name: "replay_identity_conflict", gameId: this.gameId });
+        job.reply(IDENTITY_CONFLICT_OUTCOME);
+        return;
+      case "replayed":
+        this.#facts.record({ name: "command_replayed", gameId: this.gameId });
+        job.reply(Object.freeze({ kind: "decided", response: replay.response }));
+        return;
+    }
   }
 
   async #runDeadline(observedAt: MonotonicMs): Promise<void> {

@@ -1,4 +1,6 @@
-import type { UserId } from "@chess-one/identity";
+import type { AccountStatus, UserId } from "@chess-one/identity";
+import type { SessionEndListener } from "./extensions.ts";
+import type { RevocationReason } from "./ports.ts";
 import type { SessionId } from "./tokens.ts";
 
 interface Watcher {
@@ -6,6 +8,9 @@ interface Watcher {
   readonly userId: UserId;
   readonly onEnd: () => void;
 }
+
+/** Listeners are composition-time wiring (one per layer above accounts), never per request. */
+const MAX_LISTENERS = 8;
 
 /**
  * In-process notice that sessions ended, so holders of long-lived
@@ -17,6 +22,12 @@ interface Watcher {
 export class SessionRevocations {
   readonly #bySession = new Map<SessionId, Set<Watcher>>();
   readonly #byUser = new Map<UserId, Set<Watcher>>();
+  readonly #listeners = new Set<SessionEndListener>();
+  readonly #reportDefect: (error: unknown) => void;
+
+  constructor(reportDefect: (error: unknown) => void) {
+    this.#reportDefect = reportDefect;
+  }
 
   get size(): number {
     let count = 0;
@@ -32,14 +43,34 @@ export class SessionRevocations {
     return () => this.#remove(watcher);
   }
 
-  sessionsEnded(sessionIds: readonly SessionId[]): void {
+  listen(listener: SessionEndListener): () => void {
+    if (this.#listeners.size >= MAX_LISTENERS && !this.#listeners.has(listener)) {
+      throw new Error("Too many session end listeners");
+    }
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
+  }
+
+  sessionsEnded(userId: UserId, sessionIds: readonly SessionId[], reason: RevocationReason): void {
     for (const sessionId of sessionIds) {
       for (const watcher of [...(this.#bySession.get(sessionId) ?? [])]) this.#end(watcher);
     }
+    this.#tell((listener) => listener.sessionsEnded(userId, sessionIds, reason));
   }
 
-  userEnded(userId: UserId): void {
+  userEnded(userId: UserId, status: AccountStatus): void {
     for (const watcher of [...(this.#byUser.get(userId) ?? [])]) this.#end(watcher);
+    this.#tell((listener) => listener.accountClosed(userId, status));
+  }
+
+  #tell(call: (listener: SessionEndListener) => void): void {
+    for (const listener of [...this.#listeners]) {
+      try {
+        call(listener);
+      } catch (error: unknown) {
+        this.#reportDefect(error);
+      }
+    }
   }
 
   #end(watcher: Watcher): void {

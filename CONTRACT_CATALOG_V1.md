@@ -192,6 +192,8 @@ Reason: without the lease, a controller holding a replacement lease could send a
 
 لا تقنية تنفيذ هنا. تفعيل الاستلام نفسه لا يضيف رقم مهلة.
 
+*Batch 11 (2026-09-29), pending review; changelog section 22.* Realized for players: the conceptual `session_id` is the controlling session stored per seat, and `actor_id` the seat from the game's assignment. Takeover is the explicit `claim_game_control` (section 13): steps 1 to 4 and 6 are implemented (identity and session checked; a new lease issued; the old lease refused by the game's writer, as `CONTROL_NOT_HELD` rather than `Unauthorized`, from the moment the rotation is queued; both devices told and able to resync). Step 5 is a fact, not yet a durable AuditEvent (GAME-CONTROL-EVENT-001). `device_id`, `issued_at`, and `supersedes_lease_id` are not stored; the record keeps a `control_version` instead. The lease never leaves the server.
+
 ## 5. game.finished.v1
 
 | Field | Required | Rule |
@@ -356,6 +358,7 @@ Added in Phase 1 Batch 9 (2026-09-29), pending review; decisions LIVE-RT-001 to 
 - Frames: UTF-8 text JSON only, one message per frame, at most the advertised `maxMessageBytes` (4096 by default, never above 16384).
 - Close codes: 1000, 1002, 1008, 1009 only (LIVE-RT-014).
 - *Batch 10:* the production resolver reads only the session cookie (section 12); the `Authorization` header is not a credential there. A connection whose session ends is closed 1008 with reason `session_ended`, or `session_unverifiable` if the session store cannot answer the periodic recheck (AUTH-REVOCATION-001).
+- *Batch 11:* the resolver no longer returns seat grants with leases. It returns the actor, a listing of the user's seats (what `connection_ready.games` shows; it grants nothing), and the session's game authority, which answers every seat, control, and claim question from the store (section 13).
 
 ### 11.2 Client messages / رسائل العميل
 
@@ -366,7 +369,8 @@ Flat JSON objects with a `type`; unknown fields are errors; no arrays; depth at 
 | `hello` | `protocol` = `chess_one.realtime.v1` | Opens the session |
 | `ping` | `nonce?` | Application liveness; answered `pong` |
 | `sync_game` | `requestId?`, `gameId` | Subscribe to a granted game and receive its snapshot |
-| `game_command` | `requestId?`, `command` | One of the five v1 commands of sections 2 and 10, with exactly their fields. Server-owned fields (`received_at`, sequence, SAN, result, clock) are refused as unknown |
+| `claim_game_control` | `requestId?`, `gameId` | *Batch 11.* Take control of this session's seat in the game (section 13) |
+| `game_command` | `requestId?`, `command` | One of the five v1 commands of sections 2 and 10, with exactly their fields. Server-owned fields (`received_at`, sequence, SAN, result, clock) are refused as unknown. *Batch 11:* `controlLeaseId` is optional; if sent it is still length-checked, then discarded, and the server uses the lease this session holds |
 
 ### 11.3 Server messages / رسائل الخادم
 
@@ -378,7 +382,10 @@ Flat JSON objects with a `type`; unknown fields are errors; no arrays; depth at 
 | `command_response` | `requestId`, `response` | The decision (section 2.5 codes), sent only after the commit; `replayed` marks a stored response |
 | `recovery_required` | `requestId`, `gameId`, `reason`, `clientCommandId` | Play is paused until an operator recovery, and the request decided nothing. `reason`: `RECOVERY_PAUSED_CLOCK_DOMAIN_CHANGED` (the stored clock anchor belongs to another clock domain), `PERSISTENCE_UNAVAILABLE` (a load, commit, or create failed in this process), `WRITER_FAULT` (the writer hit an unexpected exception; no error text is sent), `CONCURRENCY_OWNERSHIP_UNCERTAIN` (the stored sequence moved under the writer, so another writer may own the game; the database may be healthy; Batch 9.2), or `CREATE_RECONCILIATION_REQUIRED` (a create reported failed could not be confirmed either way; Batch 9.2). `clientCommandId` is the refused command's id, or null; that id stays unbound. Sent with `requestId: null` to every subscriber when an infrastructure pause begins. Balances are the last committed ones, and downtime is never charged (Batch 9.1) |
 | `sync_required` | `gameId`, `reason` = `WRITER_STOPPED` | The client must `sync_game` again |
-| `request_failed` | `requestId`, `code`, `retryable`, `clientCommandId` | `GAME_ACCESS_DENIED`, `GAME_NOT_FOUND`, `GAME_UNAVAILABLE`, `SUBSCRIPTION_LIMIT`, or `TEMPORARILY_UNAVAILABLE` (retryable) |
+| `control_granted` | `requestId`, `gameId`, `seat` | *Batch 11.* This session controls the seat. `requestId` is null when another connection of the same session claimed it |
+| `control_denied` | `requestId`, `gameId`, `code`, `retryable` | *Batch 11.* The claim took nothing: `GAME_ACCESS_DENIED`, `GAME_CLOSED`, `SESSION_ENDED`, `RATE_LIMITED`, `CONFLICT`, `TEMPORARILY_UNAVAILABLE` |
+| `control_revoked` | `gameId`, `seat`, `code` | *Batch 11.* This session lost control: `CONTROL_TRANSFERRED` (another session of the same player claimed it) or `CONTROL_RELEASED` (logout, revocation, account closed, expiry). A courtesy: the writer refuses the old lease whether or not it arrives. Never names who took the seat |
+| `request_failed` | `requestId`, `code`, `retryable`, `clientCommandId` | `GAME_ACCESS_DENIED`, `GAME_NOT_FOUND`, `GAME_UNAVAILABLE`, `SUBSCRIPTION_LIMIT`, or `TEMPORARILY_UNAVAILABLE` (retryable). *Batch 11:* `CONTROL_NOT_HELD` (not retryable as is): this session does not control the seat, and the command was not received, queued, stamped, or bound; claim, then send again. `GAME_ACCESS_DENIED` now also answers a game that does not exist, so a stranger cannot tell the two apart. *Batch 11.1:* `CONTROL_NOT_HELD` is sent only when the id is also not one this seat already bound (section 13.3). `INVALID_COMMAND_IDENTITY` (not retryable): without control, the id is bound to a different command; nothing was decided or returned |
 | `server_busy` | `requestId`, `code`, `retryable` = true, `clientCommandId` | `RATE_LIMITED`, `WRITER_QUEUE_FULL`, `WRITER_CAPACITY`; the command was not received |
 | `protocol_error` | `code`, `field` | The message was invalid; `field` is a schema field name or null |
 | `pong` | `nonce` | Answer to `ping` |
@@ -388,6 +395,8 @@ Four failure families stay distinct: `protocol_error` (the client sent something
 ### 11.4 `game_snapshot.v1`
 
 A client format, separate from the stored `live_game_state.v1`: `format`, `gameId`, `rulesetId`, `sequence`, `positionFen`, `sideToMove`, `seat` (this connection's), `status` (`active`; `finished` with `resultCode`, `terminationReason`, `winner`, `drawRuleDetails`; or `unresolved` with `reason` and `side`), `playable` (true only while running), `recoveryRequired`, `recoveryReason` (one of the `recovery_required` reasons, or null; Batch 9.1), `clock` (`whiteMs`, `blackMs`, `activeSide`, `running`: balances as of the snapshot, clamped at 0; while paused, the stored balances with `running: false`), and `pendingDrawOffer` (`offerId`, `offeredBy`, `offeredTo`, or null). It never contains a monotonic anchor, `received_at`, binding, fingerprint, control lease, player id, clock domain, or database detail. A `command_response` carries the committed balances the same way, without anchors.
+
+*Batch 11:* two fields are added: `controlHeld` (this session controls `seat` now, so its commands are admitted) and `canClaimControl` (not held and the game `active`). Still no session id, lease, internal id, or the opponent's user id.
 
 ### 11.5 Receipt, order, and delivery / الاستلام والترتيب والتسليم
 
@@ -401,6 +410,8 @@ A client format, separate from the stored `live_game_state.v1`: `format`, `gameI
 - A disconnect changes nothing: the server clock keeps running and the writer still flags at the deadline (section 3, TransportInterrupted).
 - On reconnect the client sends `hello`, then `sync_game`; the snapshot is the authority (ResyncRequired → Resyncing → ActiveControlled for a granted seat). An uncertain command is resent with the same `clientCommandId` and replays.
 - Not realized yet: ViewOnly, LeaseSuperseded, lease takeover, and AbandonmentEvaluation (LIVE-MULTI-CONNECTION-001, LIVE-VIEW-ONLY-001).
+- *Batch 11:* lease takeover and LeaseSuperseded are realized for players (section 13). A reconnect of the same session keeps control and its lease; another session of the same player resyncs with `controlHeld: false` and claims to play. *Superseded by Batch 11.1:* ~~A former controller's exact resend is answered from storage only on the connection that held the lease; after a reconnect it gets `CONTROL_NOT_HELD` and resyncs to learn the outcome (GAME-CONTROL-REPLAY-RECONNECT-001).~~ ViewOnly for non-players and AbandonmentEvaluation stay unrealized (LIVE-VIEW-ONLY-001).
+- *Batch 11.1:* an uncertain command of a session that no longer controls the seat is resent with the same `clientCommandId` on any connection of any active session of the same player, also after a server restart, and replays from storage (section 13.3; GAME-CONTROL-REPLAY-RECONNECT-001 RESOLVED).
 
 الاتصال عبر WebSocket بالبروتوكول الفرعي `chess_one.realtime.v1`. الهوية والمقعد وعقد التحكم من الجلسة الموثوقة فقط. زمن الاستلام يختمه كاتب اللعبة الوحيد عند قبول الأمر في طابوره. الرد يسبق التحديث، ولا يُرسل تسلسل أقل مما أُرسل. عند الشك: إعادة اتصال ثم مزامنة.
 
@@ -449,4 +460,49 @@ Authenticated routes answer 401 `UNAUTHENTICATED` without a valid session, and c
 
 The `/realtime` upgrade authenticates with the same cookie (section 11.1). The actor is the account's `userId`; seats and control leases come from game assignment, never from the session or the client. Ending a session closes its sockets (1008 `session_ended`).
 
+*Batch 11:* realized by game access (section 13). Ending a session also releases every seat it controls (logout, logout-all, revoke one, password change or reset, session limit, expiry), and disabling or locking an account releases every seat of the user's games; nothing is resigned and no other session is given control.
+
 المصادقة بملف تعريف جلسة HttpOnly فقط، ولا يحمل أي جسم رسالة هوية المستخدم أو مقعده. رسالة فشل الدخول واحدة للحساب غير الموجود ولكلمة المرور الخاطئة. تسجيل الخروج يُنهي الجلسة في قاعدة البيانات ويغلق اتصالاتها المفتوحة فورًا.
+
+## 13. Game access and seat control / الوصول إلى المباراة والتحكم بالمقعد
+
+Added in Phase 1 Batch 11 (2026-09-29), pending review; decisions GACC-001 to GACC-014 in changelog section 22, and GACC-015 and GACC-016 (Batch 11.1) in section 23. It realizes section 4 for players and the authority order of section 2.1 through the realtime protocol of section 11, which stays `chess_one.realtime.v1`: every change is a new message, code, or snapshot field, and a client `controlLeaseId` is still accepted (length-checked, then discarded).
+
+### 13.1 Authority chain / سلسلة السلطة
+
+1. The session cookie proves the account (`userId`, section 12).
+2. The game's assignment gives the seat: exactly two different accounts, one per seat, fixed at creation. Nobody else has access; a game that does not exist and a game of other players get the same answer (`GAME_ACCESS_DENIED`).
+3. The seat's control record names the one session that controls it, if any.
+4. That session's control lease is filled into the command by the server (the `control_lease_id` of section 2.2 is server-supplied; the client never sends or sees it).
+5. The game's single writer admits the command only if the lease is the seat's lease as of the end of its queue; otherwise `CONTROL_NOT_HELD`, and nothing is received, queued, stamped, or bound.
+6. The live-game core validates the command as before.
+
+*Batch 11.1:* a command that is not admitted at step 5 (or is sent by a session without control) is looked up, read-only, as a historical replay of the seat's stored bindings (section 13.3) before `CONTROL_NOT_HELD` is sent.
+
+### 13.2 Control / التحكم
+
+- One controlling session per seat. A new game starts with no controller; each player claims once. Access (sync) never takes control.
+- `claim_game_control` by the holder keeps its lease; by another session of the same player it issues a new lease, makes that session the holder, and makes the old lease inadmissible from the moment the rotation is queued. The previous holder's connections get `control_revoked CONTROL_TRANSFERRED`.
+- There is no silent takeover: a second session syncs with `controlHeld: false` and must claim.
+- Claims are refused for non-players (`GAME_ACCESS_DENIED`), ended sessions (`SESSION_ENDED`), finished or rules-unresolved games (`GAME_CLOSED`), too many claims (`RATE_LIMITED`), and a control record changed by another process (`CONFLICT`); a store outage is `TEMPORARILY_UNAVAILABLE`. A refused claim changes nothing.
+- A claim changes no clock, sequence, position, repetition history, result, or outbox row. It works during a recovery pause and does not resume the game.
+- Ending a session releases the seats it controls; closing an account releases every seat of its games. A released seat has no controller and a fresh lease; nothing is resigned and no other session is given control. The released connections get `control_revoked CONTROL_RELEASED` if they are still open.
+
+### 13.3 Replay after a control change / إعادة الإرسال بعد تغيير التحكم
+
+*Batch 11.1 (2026-09-29), pending review; GACC-015 and GACC-016 in changelog section 23. Replaces the Batch 11 wording (connection memory of the last 64 ids), which is superseded.*
+
+- A command admitted under a lease keeps its stored decision; the binding store remains the idempotency authority, and it is the only one. No connection memory decides a replay.
+- A session that does not control the seat may resend a command its seat already bound and receives the stored decision unchanged, with `replayed: true`. This holds on the same connection, after a reconnect, from any other active session of the same player, and after a server restart.
+- Before any lookup, the server proves in its stores that the session is still active and that its user is the player assigned to the seat. Control is not required. A replay grants no authority: the session still cannot send a new command without claiming.
+- The server rebuilds the command's fingerprint (section 2.6.2) with the control lease stored in the binding itself and answers only if it equals the stored fingerprint exactly. The client never names a lease, and neither the lease nor the fingerprint is ever sent.
+- A command id the seat never bound is `CONTROL_NOT_HELD`: nothing is received, stamped, or bound. The same id with a different command is `INVALID_COMMAND_IDENTITY`, and nothing is decided or returned.
+- The lookup is limited to the requester's own seat. The opponent resending the same id finds nothing of the other seat (`CONTROL_NOT_HELD`); a non-player gets `GAME_ACCESS_DENIED`; an ended, expired, or logged-out session cannot connect at all.
+- A replay changes no sequence, binding, clock, position, outbox row, or control record.
+- The current controller is still under section 2.6.2: resending an id bound under an earlier lease is `InvalidCommandIdentity` (a command response), not a replay (GACC-016).
+
+### 13.4 Trusted creation / الإنشاء الموثوق
+
+Games with players are created only by the internal `createAssignedGame(gameId, white, black, timeControl)`: both accounts exist, are different, and are active (a verified-email requirement exists as an unused hook, AUTH-EMAIL-VERIFIED-001). The assignment and the live game are created together or not at all as far as any caller can tell: an uncertain outcome is reported `creation_unconfirmed`, never success, and settled later by reconciliation. There is no public game-creation endpoint; matchmaking and challenges will call this use case (GAME-ACCESS-CREATION-API-001).
+
+المقعد من تعيين المباراة الدائم، والتحكم لجلسة واحدة لكل مقعد، وعقد التحكم سرّي على الخادم. الاستلام صريح عبر `claim_game_control` ويُدوّر العقد، والعقد القديم مرفوض من لحظة التدوير حتى لو لم يصل الإشعار. إنهاء الجلسة أو إغلاق الحساب يُسقط التحكم دون استسلام ودون نقله لجلسة أخرى.

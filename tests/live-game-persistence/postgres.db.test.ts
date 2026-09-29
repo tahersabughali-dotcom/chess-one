@@ -666,7 +666,7 @@ describe("TST-PERSIST-DB PostgreSQL integration (needs a local test database)", 
         const rows = await storedRows(harness);
         expect(rows.game?.sequence).toBe("1");
         expect(rows.bindings.map((row) => row.client_command_id)).toEqual([
-          winner.plan.binding?.clientCommandId,
+          winner.plan.kind === "control" ? null : winner.plan.binding?.clientCommandId,
         ]);
       });
     });

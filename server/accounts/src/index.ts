@@ -1,5 +1,7 @@
 export { Accounts } from "./accounts.ts";
 export type {
+  AccountDirectory,
+  AccountStanding,
   AccountsApi,
   AccountView,
   AuthenticatedSession,
@@ -37,6 +39,7 @@ export {
   type AccountTokenDelivery,
   type CompromisedPasswordScreen,
   NO_COMPROMISED_PASSWORD_SCREEN,
+  type SessionEndListener,
   type TokenDelivery,
 } from "./extensions.ts";
 export type {

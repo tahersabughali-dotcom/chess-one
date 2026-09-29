@@ -21,6 +21,7 @@ import { DefectLog, RecordingFacts } from "./facts.ts";
 import type { RuntimeHarness } from "./runtime.ts";
 import { runtimeHarness } from "./runtime.ts";
 import { TestTrustedSessionResolver } from "./sessions.ts";
+import { staticSession } from "./static-access.ts";
 import { ManualClock } from "./time.ts";
 
 export const TOKENS = Object.freeze({
@@ -31,18 +32,14 @@ export const TOKENS = Object.freeze({
 
 /** White holds game-1 and game-2 (never stored), black holds game-1, the stranger holds nothing. */
 export const TEST_SESSIONS: Readonly<Record<string, TrustedSessionContext>> = Object.freeze({
-  [TOKENS.white]: {
-    actorId: PLAYERS.white,
-    grants: [
-      { gameId: GAME_ID, seat: "white", controlLeaseId: LEASES.white },
-      { gameId: OTHER_GAME_ID, seat: "white", controlLeaseId: LEASES.white },
-    ],
-  },
-  [TOKENS.black]: {
-    actorId: PLAYERS.black,
-    grants: [{ gameId: GAME_ID, seat: "black", controlLeaseId: LEASES.black }],
-  },
-  [TOKENS.stranger]: { actorId: STRANGER, grants: [] },
+  [TOKENS.white]: staticSession(PLAYERS.white, [
+    { gameId: GAME_ID, seat: "white", controlLeaseId: LEASES.white },
+    { gameId: OTHER_GAME_ID, seat: "white", controlLeaseId: LEASES.white },
+  ]),
+  [TOKENS.black]: staticSession(PLAYERS.black, [
+    { gameId: GAME_ID, seat: "black", controlLeaseId: LEASES.black },
+  ]),
+  [TOKENS.stranger]: staticSession(STRANGER, []),
 });
 
 /** An edge clock that moves one second per reading, so rate control never engages. */

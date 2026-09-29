@@ -99,6 +99,15 @@ describe("TST-PROTO client messages", () => {
       ok: true,
       message: { type: "sync_game", requestId: null, gameId: GAME_ID },
     });
+    expect(
+      decodeClientMessage('{"type":"claim_game_control","requestId":"c-1","gameId":"game-1"}'),
+    ).toEqual({
+      ok: true,
+      message: { type: "claim_game_control", requestId: "c-1", gameId: GAME_ID },
+    });
+    expect(
+      decodeClientMessage('{"type":"claim_game_control","gameId":"game-1","seat":"white"}'),
+    ).toEqual({ ok: false, violation: { code: "UNKNOWN_FIELD", field: null } });
     const commands = [
       moveCommand(s0, "e2e4", { clientSan: "e4" }),
       moveCommand(s0, "e2e4", { promotionPiece: "q" }),
@@ -119,13 +128,39 @@ describe("TST-PROTO client messages", () => {
       },
     ];
     for (const command of commands) {
+      const { controlLeaseId: _sent, ...withoutLease } = command;
+      const expected = {
+        ok: true,
+        message: { type: "game_command", requestId: "r-1", gameId: GAME_ID, command: withoutLease },
+      };
       expect(
         decodeClientMessage(JSON.stringify({ type: "game_command", requestId: "r-1", command })),
-      ).toEqual({
-        ok: true,
-        message: { type: "game_command", requestId: "r-1", gameId: GAME_ID, command },
-      });
+      ).toEqual(expected);
+      expect(
+        decodeClientMessage(
+          JSON.stringify({ type: "game_command", requestId: "r-1", command: withoutLease }),
+        ),
+      ).toEqual(expected);
     }
+  });
+
+  it("TST-PROTO-012 a client control lease is still type- and length-checked, then discarded", () => {
+    const s0 = newGame();
+    const send = (controlLeaseId: unknown) =>
+      decodeClientMessage(
+        JSON.stringify({
+          type: "game_command",
+          command: { ...moveCommand(s0, "e2e4"), controlLeaseId },
+        }),
+      );
+    expect(send(7)).toEqual({
+      ok: false,
+      violation: { code: "INVALID_FIELD", field: "controlLeaseId" },
+    });
+    expect(send("x".repeat(129))).toMatchObject({ ok: false });
+    const decoded = send("any-lease-the-client-likes");
+    expect(decoded.ok).toBe(true);
+    expect(JSON.stringify(decoded)).not.toContain("any-lease-the-client-likes");
   });
 
   it("TST-PROTO-011 the largest legal message fits the frame limit, which stays at or under 16 KiB", () => {
@@ -165,10 +200,13 @@ describe("TST-PROTO server encoding", () => {
   it("TST-PROTO-020 game_snapshot.v1 has exactly its documented fields and no internals", async () => {
     const h = runtimeHarness();
     await store(h, newGame());
-    const snapshot = encodeSnapshot(await viewOf(writerOf(h)), "black");
+    const view = await viewOf(writerOf(h));
+    const snapshot = encodeSnapshot(view, "black", false);
     expect(Object.keys(snapshot).sort()).toEqual(
       [
+        "canClaimControl",
         "clock",
+        "controlHeld",
         "format",
         "gameId",
         "pendingDrawOffer",
@@ -185,6 +223,12 @@ describe("TST-PROTO server encoding", () => {
     );
     expect(snapshot.format).toBe(SNAPSHOT_FORMAT);
     expect(snapshot.seat).toBe("black");
+    expect(snapshot).toMatchObject({ controlHeld: false, canClaimControl: true });
+    expect(encodeSnapshot(view, "black", true)).toMatchObject({
+      controlHeld: true,
+      canClaimControl: false,
+    });
+    expect(JSON.stringify(snapshot)).not.toMatch(/lease|session|player-/i);
     expect(Object.keys(snapshot.clock).sort()).toEqual([
       "activeSide",
       "blackMs",

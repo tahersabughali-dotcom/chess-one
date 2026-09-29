@@ -11,8 +11,10 @@ export class RecordingFacts<F extends { readonly name: string }> implements Fact
     return this.facts.filter((fact) => fact.name === name).length;
   }
 
-  named(name: F["name"]): readonly F[] {
-    return this.facts.filter((fact) => fact.name === name);
+  named<N extends F["name"]>(name: N): readonly Extract<F, { readonly name: N }>[] {
+    return this.facts.filter(
+      (fact): fact is Extract<F, { readonly name: N }> => fact.name === name,
+    );
   }
 }
 

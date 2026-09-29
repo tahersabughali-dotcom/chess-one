@@ -222,6 +222,9 @@ importers:
       '@chess-one/accounts':
         specifier: workspace:*
         version: link:../accounts
+      '@chess-one/game-access':
+        specifier: workspace:*
+        version: link:../game-access
       '@chess-one/live-game-runtime':
         specifier: workspace:*
         version: link:../live-game-runtime
@@ -235,6 +238,40 @@ importers:
       '@types/ws':
         specifier: 8.18.1
         version: 8.18.1
+
+  server/game-access:
+    dependencies:
+      '@chess-one/accounts':
+        specifier: workspace:*
+        version: link:../accounts
+      '@chess-one/identity':
+        specifier: workspace:*
+        version: link:../../domain/identity
+      '@chess-one/live-game-runtime':
+        specifier: workspace:*
+        version: link:../live-game-runtime
+
+  server/game-access-persistence:
+    dependencies:
+      '@chess-one/accounts':
+        specifier: workspace:*
+        version: link:../accounts
+      '@chess-one/game-access':
+        specifier: workspace:*
+        version: link:../game-access
+      '@chess-one/live-game-runtime':
+        specifier: workspace:*
+        version: link:../live-game-runtime
+      kysely:
+        specifier: 0.29.6
+        version: 0.29.6
+      pg:
+        specifier: 8.23.0
+        version: 8.23.0
+    devDependencies:
+      '@types/pg':
+        specifier: 8.23.1
+        version: 8.23.1
 
   server/live-game:
     dependencies:
@@ -290,6 +327,9 @@ importers:
       '@chess-one/edge':
         specifier: workspace:*
         version: link:../../server/edge
+      '@chess-one/game-access':
+        specifier: workspace:*
+        version: link:../../server/game-access
       '@chess-one/game-values':
         specifier: workspace:*
         version: link:../../domain/game-values
@@ -319,6 +359,54 @@ importers:
         version: 8.22.0
 
   tests/boundaries: {}
+
+  tests/game-access:
+    devDependencies:
+      '@chess-one/accounts':
+        specifier: workspace:*
+        version: link:../../server/accounts
+      '@chess-one/accounts-persistence':
+        specifier: workspace:*
+        version: link:../../server/accounts-persistence
+      '@chess-one/chess-rules':
+        specifier: workspace:*
+        version: link:../../domain/chess-rules
+      '@chess-one/edge':
+        specifier: workspace:*
+        version: link:../../server/edge
+      '@chess-one/game-access':
+        specifier: workspace:*
+        version: link:../../server/game-access
+      '@chess-one/game-access-persistence':
+        specifier: workspace:*
+        version: link:../../server/game-access-persistence
+      '@chess-one/game-values':
+        specifier: workspace:*
+        version: link:../../domain/game-values
+      '@chess-one/identity':
+        specifier: workspace:*
+        version: link:../../domain/identity
+      '@chess-one/live-game':
+        specifier: workspace:*
+        version: link:../../server/live-game
+      '@chess-one/live-game-persistence':
+        specifier: workspace:*
+        version: link:../../server/live-game-persistence
+      '@chess-one/live-game-runtime':
+        specifier: workspace:*
+        version: link:../../server/live-game-runtime
+      '@types/ws':
+        specifier: 8.18.1
+        version: 8.18.1
+      kysely:
+        specifier: 0.29.6
+        version: 0.29.6
+      pg:
+        specifier: 8.23.0
+        version: 8.23.0
+      ws:
+        specifier: 8.22.0
+        version: 8.22.0
 
   tests/live-game:
     devDependencies:
@@ -361,6 +449,9 @@ importers:
       '@chess-one/edge':
         specifier: workspace:*
         version: link:../../server/edge
+      '@chess-one/game-access':
+        specifier: workspace:*
+        version: link:../../server/game-access
       '@chess-one/game-values':
         specifier: workspace:*
         version: link:../../domain/game-values

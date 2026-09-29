@@ -1,33 +1,17 @@
 import type { SessionAuthority } from "@chess-one/accounts";
-import { isPlayerId, type PlayerId } from "@chess-one/live-game-runtime";
+import type { GameAccessProvider } from "@chess-one/game-access";
+import { isPlayerId } from "@chess-one/live-game-runtime";
 import type {
-  GameSeatGrant,
   SessionCredentials,
   TrustedSessionContext,
   TrustedSessionResolver,
 } from "../session.ts";
 import { readSessionCookie, type SessionCookiePolicy } from "./cookie.ts";
 
-/**
- * Which games, seats, and control leases a signed-in player holds. Seats come
- * from game assignment, never from the session or the client. Batch 10 has
- * no matchmaking, so the production resolver is `NO_GAME_ACCESS`; tests
- * supply a `test_only` one.
- */
-export interface GameAccessResolver {
-  readonly trust: "production" | "test_only";
-  grantsFor(playerId: PlayerId): Promise<readonly GameSeatGrant[]>;
-}
-
-/** Grants nothing: an authenticated player with no assigned game. */
-export const NO_GAME_ACCESS: GameAccessResolver = Object.freeze({
-  trust: "production",
-  grantsFor: async (): Promise<readonly GameSeatGrant[]> => [],
-});
-
 export interface ProductionSessionResolverOptions {
   readonly sessions: SessionAuthority;
-  readonly gameAccess: GameAccessResolver;
+  /** Seats and control come from game access, never from the session or the client. */
+  readonly gameAccess: GameAccessProvider;
   readonly cookie: SessionCookiePolicy;
   readonly maxCookieLength: number;
 }
@@ -38,7 +22,8 @@ export interface ProductionSessionResolverOptions {
  * (a header, a query, a message field) can name another. The Authorization
  * header is not a credential here. A missing, malformed, duplicated,
  * unknown, expired, idle, or revoked session, or a disabled or locked
- * account, resolves to null (401 at the upgrade).
+ * account, resolves to null (401 at the upgrade). The session's game
+ * authority answers every seat and control question afterwards.
  */
 export class ProductionTrustedSessionResolver implements TrustedSessionResolver {
   readonly trust: "production" | "test_only";
@@ -60,10 +45,10 @@ export class ProductionTrustedSessionResolver implements TrustedSessionResolver 
     if (session === null) return null;
     const actorId = session.userId;
     if (!isPlayerId(actorId)) return null;
-    const grants = await gameAccess.grantsFor(actorId);
     return {
       actorId,
-      grants,
+      games: await gameAccess.seatsOf(actorId),
+      authority: gameAccess.forSession(session, actorId),
       liveness: {
         check: () => sessions.isSessionActive(session),
         watch: (onEnd) => sessions.watchSession(session, onEnd),

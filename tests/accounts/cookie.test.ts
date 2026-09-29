@@ -3,9 +3,7 @@ import {
   clearedSessionCookieHeader,
   type EdgeConfig,
   EdgeConfigError,
-  type GameAccessResolver,
   LOOPBACK_SESSION_COOKIE,
-  NO_GAME_ACCESS,
   ProductionTrustedSessionResolver,
   readSessionCookie,
   resolveEdgeConfig,
@@ -14,15 +12,24 @@ import {
   sessionCookieHeader,
   sessionCookiePolicy,
 } from "@chess-one/edge";
+import type { GameAccessProvider } from "@chess-one/game-access";
 import { describe, expect, it } from "vitest";
 import { DefectLog, RecordingFacts } from "../realtime/support/facts.ts";
 import { runtimeHarness } from "../realtime/support/runtime.ts";
+import { staticAuthority } from "../realtime/support/static-access.ts";
 import { ManualClock } from "../realtime/support/time.ts";
 import { accountsHarness } from "./support/harness.ts";
 import { TestGameAccess } from "./support/http.ts";
 
 const SECURE = sessionCookiePolicy("secure");
 const LOOPBACK = sessionCookiePolicy("insecure_loopback");
+
+/** Declares production trust only, to exercise the resolver's trust rule; it grants nothing. */
+const PRODUCTION_ACCESS: GameAccessProvider = Object.freeze({
+  trust: "production",
+  seatsOf: async () => [],
+  forSession: () => staticAuthority([]),
+});
 
 describe("TST-AUTH-COOKIE the session cookie", () => {
   it("TST-AUTH-COOKIE-001 production cookies are __Host-, Secure, HttpOnly, SameSite=Lax, Path=/, with no Domain", () => {
@@ -90,7 +97,7 @@ describe("TST-AUTH-COOKIE the session cookie", () => {
     const h = accountsHarness();
     const resolver = (
       cookie: SessionCookiePolicy,
-      gameAccess: GameAccessResolver = NO_GAME_ACCESS,
+      gameAccess: GameAccessProvider = PRODUCTION_ACCESS,
     ) =>
       new ProductionTrustedSessionResolver({
         sessions: h.accounts,

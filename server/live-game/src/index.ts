@@ -21,13 +21,14 @@ export {
   type TimeControl,
   type WallClockMs,
 } from "./clock.ts";
-export { fingerprintOf } from "./command-identity.ts";
+export { boundLease, fingerprintOf } from "./command-identity.ts";
 export {
   CLAIM_DRAW_COMMAND_V1,
   type ClaimDrawCommandV1,
   type CommandName,
   type CommandShapeError,
   type DrawOfferDecision,
+  type LeaselessCommand,
   type LiveGameCommand,
   OFFER_DRAW_COMMAND_V1,
   type OfferDrawCommandV1,
@@ -40,6 +41,13 @@ export {
   SUBMIT_MOVE_COMMAND_V1,
   type SubmitMoveCommandV1,
 } from "./commands.ts";
+export {
+  type GameParticipant,
+  type HistoricalReplay,
+  historicalReplay,
+  type LeaseRotationError,
+  withControlLease,
+} from "./control-lease.ts";
 export type { AuthorizedGameActor, CommandDecision, Ingress } from "./decision.ts";
 export type {
   CommandFinishProvenance,
@@ -74,6 +82,7 @@ export {
   type LoadError,
   type PersistenceFailure,
   planCommit,
+  planLeaseRotation,
   type StoredGame,
 } from "./persistence/repository.ts";
 export { encodeGameFinished } from "./persistence/response-codec.ts";
@@ -92,12 +101,16 @@ export {
   type ExecutionError,
   executeCommand,
   executeDeadline,
+  executeLeaseRotation,
   type GameCondition,
   gameCondition,
+  type LeaseRotation,
+  type LeaseRotationFailure,
   type LiveGameWriter,
   type LoadedGame,
   loadForWriter,
   type RecoveryPaused,
+  type SharedControlLease,
   startGame,
 } from "./persistence/writer.ts";
 export { type DeadlineDecision, processCommand, processDeadline } from "./process-command.ts";

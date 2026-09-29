@@ -218,8 +218,8 @@ export function createRealtimeEdge(input: EdgeConfig): RealtimeEdge {
       refuse(socket, reject(401, "unauthenticated"));
       return;
     }
-    const grants = validSession(session, limits.maxGrantsPerSession);
-    if (grants === null) {
+    const games = validSession(session, limits.maxGrantsPerSession);
+    if (games === null) {
       config.reportDefect(new Error("The session resolver returned an invalid session"));
       refuse(socket, reject(503, "session_unavailable"));
       return;
@@ -237,7 +237,7 @@ export function createRealtimeEdge(input: EdgeConfig): RealtimeEdge {
         id,
         socket: ws,
         session,
-        grants,
+        games,
         config,
         onClosed: (closed) => connections.delete(closed.id),
       });

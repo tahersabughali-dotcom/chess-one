@@ -1,0 +1,19 @@
+{
+  "name": "@chess-one/game-access-persistence",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@chess-one/accounts": "workspace:*",
+    "@chess-one/game-access": "workspace:*",
+    "@chess-one/live-game-runtime": "workspace:*",
+    "kysely": "0.29.6",
+    "pg": "8.23.0"
+  },
+  "devDependencies": {
+    "@types/pg": "8.23.1"
+  }
+}

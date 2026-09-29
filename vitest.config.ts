@@ -29,6 +29,14 @@ export default defineConfig({
           testTimeout: 20_000,
         },
       },
+      {
+        test: {
+          name: "game-access",
+          include: ["tests/game-access/**/*.test.ts"],
+          exclude: [...configDefaults.exclude, "tests/game-access/**/*.db.test.ts"],
+          testTimeout: 20_000,
+        },
+      },
     ],
   },
 });

@@ -624,6 +624,14 @@ const accStore = (name: string, content: string): SourceFile => ({
   path: `server/accounts-persistence/src/${name}`,
   content,
 });
+const ga = (name: string, content: string): SourceFile => ({
+  path: `server/game-access/src/${name}`,
+  content,
+});
+const gaStore = (name: string, content: string): SourceFile => ({
+  path: `server/game-access-persistence/src/${name}`,
+  content,
+});
 
 describe("TST-BOUNDARY accounts layers", () => {
   it("TST-BOUNDARY-035 identity is pure: no server, database, HTTP, crypto, clock, or environment", () => {
@@ -736,6 +744,94 @@ describe("TST-BOUNDARY accounts layers", () => {
     expect(
       rulesFor(
         client('import { PostgresAccountsRepository } from "@chess-one/accounts-persistence";'),
+      ),
+    ).toContain("client_imports_persistence");
+  });
+
+  it("TST-BOUNDARY-041 game access sees accounts, identity, the runtime, and node:crypto only; never the core or a store", () => {
+    for (const code of [
+      'import { Accounts } from "@chess-one/accounts";',
+      'import { isUserId } from "@chess-one/identity";',
+      'import { GameWriterRegistry } from "@chess-one/live-game-runtime";',
+      'import { randomBytes } from "node:crypto";',
+    ]) {
+      expect(rulesFor(ga("a.ts", code)), code).toEqual([]);
+    }
+    for (const code of [
+      'import { processCommand } from "@chess-one/live-game";',
+      'import { PostgresLiveGameRepository } from "@chess-one/live-game-persistence";',
+      'import { PostgresAccountsRepository } from "@chess-one/accounts-persistence";',
+      'import { PostgresGameAccessStore } from "@chess-one/game-access-persistence";',
+      'import { createRealtimeEdge } from "@chess-one/edge";',
+      'import { Kysely } from "kysely";',
+      'import Fastify from "fastify";',
+      'import { readFile } from "node:fs/promises";',
+    ]) {
+      expect(rulesFor(ga("a.ts", code)), code).toContain("forbidden_import");
+    }
+    for (const code of ["const t = Date.now();", "const r = Math.random();"]) {
+      expect(rulesFor(ga("control.ts", code)), code).toContain("ambient_access");
+    }
+    expect(rulesFor(ga("a.ts", 'import { s } from "../../accounts/src/sessions.ts";'))).not.toEqual(
+      [],
+    );
+  });
+
+  it("TST-BOUNDARY-042 the game-access store adapter has no transport, core, or edge", () => {
+    expect(
+      rulesFor(
+        gaStore(
+          "a.ts",
+          'import { GameAccessStoreError } from "@chess-one/game-access"; import { Kysely } from "kysely";',
+        ),
+      ),
+    ).toEqual([]);
+    for (const code of [
+      'import { processCommand } from "@chess-one/live-game";',
+      'import { createRealtimeEdge } from "@chess-one/edge";',
+      'import Fastify from "fastify";',
+    ]) {
+      expect(rulesFor(gaStore("a.ts", code)), code).toContain("forbidden_import");
+    }
+  });
+
+  it("TST-BOUNDARY-043 accounts and identity know nothing of games, seats, or leases", () => {
+    for (const code of [
+      'import { GameAccess } from "@chess-one/game-access";',
+      'import { PostgresGameAccessStore } from "@chess-one/game-access-persistence";',
+    ]) {
+      expect(rulesFor(acc("a.ts", code)), code).toContain("forbidden_import");
+      expect(rulesFor(id("a.ts", code)), code).not.toEqual([]);
+    }
+  });
+
+  it("TST-BOUNDARY-044 the edge uses game access, never its store; the core and runtime never see game access", () => {
+    expect(
+      rulesFor(edge("a.ts", 'import type { SessionGameAuthority } from "@chess-one/game-access";')),
+    ).toEqual([]);
+    expect(
+      rulesFor(
+        edge(
+          "a.ts",
+          'import { PostgresGameAccessStore } from "@chess-one/game-access-persistence";',
+        ),
+      ),
+    ).toContain("forbidden_import");
+    for (const layer of [lg, rt]) {
+      expect(
+        rulesFor(layer("a.ts", 'import { GameAccess } from "@chess-one/game-access";')),
+      ).toContain("forbidden_import");
+    }
+  });
+
+  it("TST-BOUNDARY-045 clients never import game access or its store", () => {
+    const client = (content: string): SourceFile => ({ path: "clients/web/src/a.ts", content });
+    expect(rulesFor(client('import { GameAccess } from "@chess-one/game-access";'))).toContain(
+      "client_imports_server",
+    );
+    expect(
+      rulesFor(
+        client('import { PostgresGameAccessStore } from "@chess-one/game-access-persistence";'),
       ),
     ).toContain("client_imports_persistence");
   });

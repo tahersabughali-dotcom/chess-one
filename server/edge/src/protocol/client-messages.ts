@@ -3,7 +3,7 @@ import {
   type CommandName,
   type GameId,
   isGameId,
-  type LiveGameCommand,
+  type LeaselessCommand,
   OFFER_DRAW_COMMAND_V1,
   RESIGN_GAME_COMMAND_V1,
   RESPOND_DRAW_OFFER_COMMAND_V1,
@@ -68,16 +68,29 @@ export interface ProtocolViolation {
   readonly field: string | null;
 }
 
+/**
+ * A command as the client may send it. The control lease is the server's:
+ * a `controlLeaseId` field is still accepted (length-checked) so v1 clients
+ * keep working, and is discarded; the edge fills in the lease its session
+ * holds, or looks the command up as a historical replay.
+ */
+export type ClientCommand = LeaselessCommand;
+
 export type ClientMessage =
   | { readonly type: "hello" }
   | { readonly type: "ping"; readonly nonce: string | null }
   | { readonly type: "sync_game"; readonly requestId: string | null; readonly gameId: GameId }
   | {
+      readonly type: "claim_game_control";
+      readonly requestId: string | null;
+      readonly gameId: GameId;
+    }
+  | {
       readonly type: "game_command";
       readonly requestId: string | null;
       /** The command's own `gameId`, validated for routing. */
       readonly gameId: GameId;
-      readonly command: LiveGameCommand;
+      readonly command: ClientCommand;
     };
 
 export type DecodeResult =
@@ -211,17 +224,17 @@ function optional<K extends string, V>(key: K, value: V | undefined): { [P in K]
  * beyond length, sequences, authorization, and identity. The game id is
  * checked here too because the transport routes on it.
  */
-function decodeCommand(members: JsonObject, gameId: GameId): LiveGameCommand {
+function decodeCommand(members: JsonObject, gameId: GameId): ClientCommand {
   const nameValue = members.get("command");
   if (nameValue === undefined) throw new Violation("MISSING_FIELD", "command");
   if (typeof nameValue !== "string") throw new Violation("INVALID_FIELD", "command");
   const name = commandName(nameValue);
   const fields = new Fields(members, [...ENVELOPE_FIELDS, ...COMMAND_FIELDS[name]]);
+  fields.optionalString("controlLeaseId", ID_LENGTH);
   const envelope = {
     contractVersion: fields.string("contractVersion", 8),
     gameId,
     clientCommandId: fields.string("clientCommandId", ID_LENGTH),
-    controlLeaseId: fields.string("controlLeaseId", ID_LENGTH),
     expectedGameSequence: fields.number("expectedGameSequence"),
     ...optional("actorId", fields.optionalString("actorId", ID_LENGTH)),
     ...optional("clientObservedAt", fields.optionalNumber("clientObservedAt")),
@@ -279,7 +292,8 @@ function decodeMessage(members: JsonObject): ClientMessage {
       }
       return { type, nonce: nonce ?? null };
     }
-    case "sync_game": {
+    case "sync_game":
+    case "claim_game_control": {
       const fields = new Fields(members, ["type", "requestId", "gameId"]);
       return { type, requestId: fields.requestId(), gameId: fields.gameId("gameId") };
     }

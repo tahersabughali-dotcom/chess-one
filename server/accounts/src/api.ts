@@ -1,4 +1,5 @@
 import type { AccountStatus, UserId } from "@chess-one/identity";
+import type { SessionEndListener } from "./extensions.ts";
 import type { SecretToken, SessionId } from "./tokens.ts";
 
 /** Facts about the request that only the transport knows. */
@@ -115,6 +116,23 @@ export interface SessionAuthority {
   isSessionActive(session: AuthenticatedSession): Promise<boolean>;
   /** Calls `onEnd` once if this process ends the session; returns the unsubscribe. */
   watchSession(session: AuthenticatedSession, onEnd: () => void): () => void;
+}
+
+/** What a trusted server use case may learn about an account it did not sign in as. */
+export interface AccountStanding {
+  readonly status: AccountStatus;
+  readonly emailVerified: boolean;
+}
+
+/**
+ * Accounts as the game-access layer sees them: the standing of an account,
+ * a session recheck, and notice when sessions end. Nothing here knows a game.
+ */
+export interface AccountDirectory {
+  accountStanding(userId: UserId): Promise<AccountStanding | null>;
+  isSessionActive(session: AuthenticatedSession): Promise<boolean>;
+  /** Returns the unsubscribe. */
+  onSessionsEnded(listener: SessionEndListener): () => void;
 }
 
 /** The public accounts API used by the HTTP transport. */

@@ -33,6 +33,7 @@ import {
   TOKENS,
 } from "./support/edge.ts";
 import { DOMAIN_OLD, IDLE_MS, runtimeHarness, store, storedState } from "./support/runtime.ts";
+import { staticSession } from "./support/static-access.ts";
 
 const harnesses: EdgeHarness[] = [];
 
@@ -176,13 +177,11 @@ describe("TST-EDGE upgrade gating: refused before any WebSocket exists", () => {
     };
     const invalid: TrustedSessionResolver = {
       trust: "test_only",
-      resolve: async () => ({
-        actorId: PLAYERS.white,
-        grants: [
+      resolve: async () =>
+        staticSession(PLAYERS.white, [
           { gameId: GAME_ID, seat: "white", controlLeaseId: LEASES.white },
           { gameId: GAME_ID, seat: "black", controlLeaseId: LEASES.black },
-        ],
-      }),
+        ]),
     };
     for (const [resolver, defects] of [
       [throwing, 1],
@@ -407,6 +406,8 @@ describe("TST-EDGE live play over WebSocket", () => {
         positionFen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
         sideToMove: "white",
         seat: "white",
+        controlHeld: true,
+        canClaimControl: false,
         status: { kind: "active" },
         playable: true,
         recoveryRequired: false,
@@ -416,7 +417,7 @@ describe("TST-EDGE live play over WebSocket", () => {
       },
     });
     expect(JSON.stringify(message)).not.toMatch(
-      /lease|anchor|fingerprint|domain|binding|player-|receivedAt/i,
+      /lease|anchor|fingerprint|domain|binding|player-|receivedAt|session/i,
     );
   });
 
@@ -943,6 +944,8 @@ describe("TST-EDGE flow control", () => {
     const black = await ready(h.url, TOKENS.black);
     expect(field(await black.sync(GAME_ID, "before"), "snapshot", "sequence")).toBe(0);
     const white = await ready(h.url, TOKENS.white);
+    // The seat must be known first: a connection closed while a lookup runs submits nothing.
+    expect(field(await white.sync(GAME_ID, "seat"), "snapshot", "sequence")).toBe(0);
     const loadsBefore = h.runtime.repository.loads;
     for (let i = 0; i < 40; i += 1) white.send(commandMessage(moveCommand(s0, "e2e4"), `f-${i}`));
     expect(await white.closed).toEqual({ code: 1008, reason: "rate_limited" });
@@ -955,9 +958,9 @@ describe("TST-EDGE flow control", () => {
         clientCommandId: null,
       },
     ]);
-    expect(h.facts.count("command_submitted")).toBe(4);
+    expect(h.facts.count("command_submitted")).toBe(3);
     expect(field(await black.sync(GAME_ID, "after"), "snapshot", "sequence")).toBe(1);
-    expect(h.runtime.repository.loads - loadsBefore).toBe(5);
+    expect(h.runtime.repository.loads - loadsBefore).toBe(4);
     expect(h.runtime.repository.commits).toBe(1);
   });
 

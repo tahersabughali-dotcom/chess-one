@@ -250,7 +250,8 @@ export class PostgresLiveGameRepository implements LiveGameRepository {
    * One transaction: compare-and-set the game row on `expectedSequence`, then
    * insert the binding and the outbox rows. Any failure rolls back all of it.
    * A bind-only plan still updates the row (audit time only), so it holds the
-   * row lock and proves the sequence it was decided on.
+   * row lock and proves the sequence it was decided on. A control plan
+   * rewrites the state record only; the stored clock domain is kept.
    */
   async commitDecision(
     plan: CommitPlan,
@@ -261,7 +262,9 @@ export class PostgresLiveGameRepository implements LiveGameRepository {
         const changes =
           plan.kind === "transition"
             ? { ...gameColumns(plan.state), clock_domain_id: clockDomainId }
-            : {};
+            : plan.kind === "control"
+              ? gameColumns(plan.state)
+              : {};
         const updated = await trx
           .updateTable("live_games")
           .set({ ...changes, updated_at: sql<string>`now()` })
@@ -269,7 +272,7 @@ export class PostgresLiveGameRepository implements LiveGameRepository {
           .where("sequence", "=", String(plan.expectedSequence))
           .executeTakeFirst();
         if (updated.numUpdatedRows !== 1n) throw new SequenceMoved();
-        if (plan.binding !== null) {
+        if (plan.kind !== "control" && plan.binding !== null) {
           await insertBinding(trx, plan.gameId, plan.binding, plan.bindingOrdinal);
         }
         const ids: EventId[] = [];

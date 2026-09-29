@@ -6,6 +6,7 @@
   "devDependencies": {
     "@chess-one/chess-rules": "workspace:*",
     "@chess-one/edge": "workspace:*",
+    "@chess-one/game-access": "workspace:*",
     "@chess-one/game-values": "workspace:*",
     "@chess-one/live-game": "workspace:*",
     "@chess-one/live-game-persistence": "workspace:*",

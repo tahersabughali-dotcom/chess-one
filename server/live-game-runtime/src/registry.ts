@@ -12,7 +12,7 @@ import {
 } from "@chess-one/live-game";
 import type { ClockDomain, WakeScheduler } from "./clock.ts";
 import type { FactSink, RuntimeFact } from "./facts.ts";
-import type { Activation, GameWriterPort, WriterLimits } from "./writer-port.ts";
+import type { Activation, GameControlPort, GameWriterPort, WriterLimits } from "./writer-port.ts";
 import { InfrastructurePauses, type InfrastructureReason } from "./writer-recovery.ts";
 import { GameWriterRuntime } from "./writer-runtime.ts";
 
@@ -40,6 +40,17 @@ export interface RegistryOptions {
 /** What a transport may ask of the registry. */
 export interface WriterDirectory {
   acquire(gameId: GameId): GameWriterPort | null;
+}
+
+/**
+ * What the trusted game-access layer may ask of the registry: a writer that
+ * also applies control leases, and the creation of assigned games.
+ */
+export interface ControlDirectory {
+  acquire(gameId: GameId): GameControlPort | null;
+  startGame(
+    game: Omit<NewGame, "startedAtMonotonicMs">,
+  ): Promise<Result<StartedGame, StartGameError>>;
 }
 
 /**
@@ -113,7 +124,7 @@ function resolveLimits(overrides: Partial<RuntimeLimits> | undefined): RuntimeLi
  * holds its writer before anything is stored and arms its deadline before
  * returning. A running game is then always watched by its writer, or paused.
  */
-export class GameWriterRegistry implements WriterDirectory {
+export class GameWriterRegistry implements WriterDirectory, ControlDirectory {
   readonly #writers = new Map<GameId, GameWriterRuntime>();
   readonly #pauses = new InfrastructurePauses();
   readonly #options: RegistryOptions;
@@ -152,7 +163,7 @@ export class GameWriterRegistry implements WriterDirectory {
     return this.#pauses.reasonOf(gameId);
   }
 
-  acquire(gameId: GameId): GameWriterPort | null {
+  acquire(gameId: GameId): GameControlPort | null {
     return this.#runtime(gameId);
   }
 

@@ -43,8 +43,12 @@ export interface SnapshotWire {
   readonly sequence: number;
   readonly positionFen: string;
   readonly sideToMove: Color;
-  /** The seat of this connection's trusted session. */
+  /** The seat of this connection's trusted session (from the game's assignment). */
   readonly seat: Seat;
+  /** Whether this session controls the seat now: its commands are admitted. */
+  readonly controlHeld: boolean;
+  /** Whether `claim_game_control` could take the seat now (not held, game active). */
+  readonly canClaimControl: boolean;
   readonly status: StatusWire;
   /** False while the game is stopped, finished, unresolved, or paused. */
   readonly playable: boolean;
@@ -74,12 +78,34 @@ export interface CommandResponseWire {
   readonly clock: ClockWire;
 }
 
+/**
+ * `GAME_ACCESS_DENIED` covers both a game of other players and a game that
+ * does not exist. `CONTROL_NOT_HELD`: another session of the same player
+ * controls the seat (or none does); the command was not received, queued,
+ * stamped, or bound, and it is not one this seat already decided. Claim
+ * control, then send it again. `INVALID_COMMAND_IDENTITY`: without control,
+ * a command id this seat already bound was sent with a different command;
+ * nothing was decided or returned.
+ */
 export type RequestFailure =
   | "GAME_ACCESS_DENIED"
   | "GAME_NOT_FOUND"
   | "GAME_UNAVAILABLE"
   | "TEMPORARILY_UNAVAILABLE"
-  | "SUBSCRIPTION_LIMIT";
+  | "SUBSCRIPTION_LIMIT"
+  | "CONTROL_NOT_HELD"
+  | "INVALID_COMMAND_IDENTITY";
+
+export type ControlDeniedCode =
+  | "GAME_ACCESS_DENIED"
+  | "GAME_CLOSED"
+  | "SESSION_ENDED"
+  | "RATE_LIMITED"
+  | "CONFLICT"
+  | "TEMPORARILY_UNAVAILABLE";
+
+/** Why this connection's session lost control of a seat; never who took it. */
+export type ControlRevokedCode = "CONTROL_TRANSFERRED" | "CONTROL_RELEASED";
 
 export type BusyCode = "RATE_LIMITED" | "WRITER_QUEUE_FULL" | "WRITER_CAPACITY";
 
@@ -126,6 +152,30 @@ export type ServerMessage =
       readonly clientCommandId: string | null;
     }
   | { readonly type: "sync_required"; readonly gameId: GameId; readonly reason: "WRITER_STOPPED" }
+  /** This session controls the seat. `requestId` is null when another connection claimed it. */
+  | {
+      readonly type: "control_granted";
+      readonly requestId: string | null;
+      readonly gameId: GameId;
+      readonly seat: Seat;
+    }
+  | {
+      readonly type: "control_denied";
+      readonly requestId: string | null;
+      readonly gameId: GameId;
+      readonly code: ControlDeniedCode;
+      readonly retryable: boolean;
+    }
+  /**
+   * A courtesy notice: the server refuses this session's commands for the
+   * seat whether or not the notice arrives.
+   */
+  | {
+      readonly type: "control_revoked";
+      readonly gameId: GameId;
+      readonly seat: Seat;
+      readonly code: ControlRevokedCode;
+    }
   | {
       readonly type: "request_failed";
       readonly requestId: string | null;
@@ -174,7 +224,7 @@ export function encodeStatus(status: GameStatus): StatusWire {
   }
 }
 
-export function encodeSnapshot(view: GameView, seat: Seat): SnapshotWire {
+export function encodeSnapshot(view: GameView, seat: Seat, controlHeld: boolean): SnapshotWire {
   const offer = view.pendingDrawOffer;
   return {
     format: SNAPSHOT_FORMAT,
@@ -184,6 +234,8 @@ export function encodeSnapshot(view: GameView, seat: Seat): SnapshotWire {
     positionFen: view.positionFen,
     sideToMove: view.sideToMove,
     seat,
+    controlHeld,
+    canClaimControl: !controlHeld && view.status.kind === "active",
     status: encodeStatus(view.status),
     playable: view.condition === "running",
     recoveryRequired: view.recoveryReason !== null,

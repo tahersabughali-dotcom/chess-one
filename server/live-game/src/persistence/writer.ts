@@ -8,8 +8,9 @@ import {
 import type { MonotonicMs, WallClockMs } from "../clock.ts";
 import { findBinding } from "../command-identity.ts";
 import { type LiveGameCommand, parseCommand } from "../commands.ts";
+import { withControlLease } from "../control-lease.ts";
 import type { AuthorizedGameActor, CommandDecision, Ingress } from "../decision.ts";
-import type { GameId } from "../ids.ts";
+import type { ControlLeaseId, GameId, Seat } from "../ids.ts";
 import { type DeadlineDecision, processCommand, processDeadline } from "../process-command.ts";
 import {
   type ClockDomainId,
@@ -19,6 +20,7 @@ import {
   type LiveGameRepository,
   type LoadError,
   planCommit,
+  planLeaseRotation,
   type StoredGame,
 } from "./repository.ts";
 
@@ -75,6 +77,18 @@ export interface CommandExecution {
 export interface DeadlineExecution {
   readonly decision: DeadlineDecision;
   readonly eventIds: readonly EventId[];
+}
+
+export interface SharedControlLease {
+  readonly kind: "shared_control_lease";
+}
+
+export type LeaseRotationFailure = LoadError | CommitError | SharedControlLease;
+
+export interface LeaseRotation {
+  readonly state: ActiveGameState;
+  /** False when the seat already had the lease: nothing was written. */
+  readonly changed: boolean;
 }
 
 const RUNNING: GameCondition = Object.freeze({ kind: "running" });
@@ -203,4 +217,28 @@ export async function executeDeadline(
   if (plan === null) return ok({ decision, eventIds: NO_EVENT_IDS });
   const committed = await writer.repository.commitDecision(plan, writer.clockDomainId);
   return committed.ok ? ok({ decision, eventIds: committed.value.eventIds }) : err(committed.error);
+}
+
+/**
+ * Makes `lease` the stored control lease of `seat`, compare-and-set on the
+ * stored sequence. It runs in every condition, a recovery pause and a
+ * finished game included: the lease decides who may send commands, never
+ * whether a command is played, and the rotation touches no clock field.
+ * The same lease writes nothing.
+ */
+export async function executeLeaseRotation(
+  writer: LiveGameWriter,
+  gameId: GameId,
+  seat: Seat,
+  lease: ControlLeaseId,
+): Promise<Result<LeaseRotation, LeaseRotationFailure>> {
+  const loaded = await loadForWriter(writer, gameId);
+  if (!loaded.ok) return err(loaded.error);
+  const { state } = loaded.value;
+  const rotated = withControlLease(state, seat, lease);
+  if (!rotated.ok) return err({ kind: rotated.error });
+  if (rotated.value === state) return ok({ state, changed: false });
+  const plan = planLeaseRotation(state, rotated.value);
+  const committed = await writer.repository.commitDecision(plan, writer.clockDomainId);
+  return committed.ok ? ok({ state: rotated.value, changed: true }) : err(committed.error);
 }

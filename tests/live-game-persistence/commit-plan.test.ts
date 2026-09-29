@@ -31,7 +31,7 @@ describe("TST-PERSIST commit planning", () => {
     expect(bad.response.code).toBe("InvalidState");
     const plan = planCommit(game, bad.nextState, bad.events);
     expect(plan).toMatchObject({ kind: "bind_only", expectedSequence: 0, bindingOrdinal: 0 });
-    expect(plan?.binding).toBe(bad.nextState.commandBindings[0]);
+    expect(plan?.kind === "bind_only" && plan.binding).toBe(bad.nextState.commandBindings[0]);
   });
 
   it("TST-PERSIST-042 a committed move plans a transition with its binding", () => {

@@ -47,5 +47,13 @@ export type EdgeFact =
   | { readonly name: "recovery_required_sent"; readonly gameId: GameId }
   | { readonly name: "server_busy"; readonly code: BusyCode }
   | { readonly name: "command_submitted"; readonly gameId: GameId }
+  /** Refused before the writer: this session does not hold the seat's control. */
+  | { readonly name: "command_refused_control"; readonly gameId: GameId }
+  | {
+      readonly name: "control_claim";
+      readonly gameId: GameId;
+      readonly outcome: "granted" | "denied" | "unavailable";
+    }
+  | { readonly name: "control_revoked_sent"; readonly gameId: GameId }
   | { readonly name: "sequence_regression_suppressed"; readonly gameId: GameId }
   | { readonly name: "auth_request_refused"; readonly reason: AuthRefusal };

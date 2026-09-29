@@ -1,7 +1,7 @@
 import type { MoveIntent } from "@chess-one/game-values";
 import type { ActiveGameState, CommandBinding, CommandResponse } from "./active-game.ts";
 import type { ParsedCommand } from "./commands.ts";
-import type { CommandId, Seat } from "./ids.ts";
+import { type CommandId, type ControlLeaseId, isControlLeaseId, type Seat } from "./ids.ts";
 
 function moveText(move: MoveIntent | undefined): string {
   return move === undefined ? "- - -" : `${move.from} ${move.to} ${move.promotion ?? "-"}`;
@@ -34,6 +34,17 @@ export function fingerprintOf(command: ParsedCommand): string {
       return `${envelope} ${command.claim.kind} ${moveText(intended)}`;
     }
   }
+}
+
+/**
+ * The control lease a stored fingerprint was bound under: its third field.
+ * No field of the envelope (command name, game id, lease) can contain a
+ * space, so the field is unambiguous. It only chooses the lease to rebuild
+ * the fingerprint with; the rebuilt text must still equal the stored one.
+ */
+export function boundLease(fingerprint: string): ControlLeaseId | null {
+  const lease = fingerprint.split(" ")[2];
+  return lease !== undefined && isControlLeaseId(lease) ? lease : null;
 }
 
 /** The binding decision stored for this seat and client command id, if any. */

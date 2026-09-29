@@ -1,5 +1,19 @@
-import type { UserId } from "@chess-one/identity";
-import type { SecretToken } from "./tokens.ts";
+import type { AccountStatus, UserId } from "@chess-one/identity";
+import type { RevocationReason } from "./ports.ts";
+import type { SecretToken, SessionId } from "./tokens.ts";
+
+/**
+ * Told, in this process, after a session revocation or an account status
+ * change is stored. It is how layers above accounts (game control) drop
+ * what a session held without accounts knowing what that is. Calls are
+ * synchronous and must not throw; a listener that throws is reported, and
+ * the others are still called.
+ */
+export interface SessionEndListener {
+  sessionsEnded(userId: UserId, sessionIds: readonly SessionId[], reason: RevocationReason): void;
+  /** The account can no longer sign in (disabled or locked); every session was revoked with it. */
+  accountClosed(userId: UserId, status: AccountStatus): void;
+}
 
 /**
  * Extension point for screening new passwords against known breach corpora

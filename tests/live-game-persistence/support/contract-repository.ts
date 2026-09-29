@@ -100,6 +100,13 @@ export class ContractRepository implements LiveGameRepository {
     if (stored === undefined || current !== plan.expectedSequence) {
       return err({ kind: "concurrency_conflict", expectedSequence: plan.expectedSequence });
     }
+    if (plan.kind === "control") {
+      this.games.set(plan.gameId, {
+        ...stored,
+        record: JSON.stringify(encodeGameState(plan.state)),
+      });
+      return ok({ eventIds: [] });
+    }
     if (stored.bindings.length !== plan.bindingOrdinal) {
       return err({ kind: "concurrency_conflict", expectedSequence: plan.expectedSequence });
     }

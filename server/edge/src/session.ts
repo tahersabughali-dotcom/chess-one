@@ -1,28 +1,10 @@
-import {
-  type ControlLeaseId,
-  type GameId,
-  isControlLeaseId,
-  isGameId,
-  isPlayerId,
-  type PlayerId,
-  type Seat,
-} from "@chess-one/live-game-runtime";
+import type { SeatListing, SessionGameAuthority } from "@chess-one/game-access";
+import { type GameId, isGameId, isPlayerId, type PlayerId } from "@chess-one/live-game-runtime";
 
 /** Raw credential headers of the upgrade request. Never logged, never echoed. */
 export interface SessionCredentials {
   readonly authorization: string | null;
   readonly cookie: string | null;
-}
-
-/**
- * One game this session may act in: the seat and the control lease the
- * trusted issuer bound to it. The transport never grants or replaces a lease;
- * the live-game core still checks it against the game's current lease.
- */
-export interface GameSeatGrant {
-  readonly gameId: GameId;
-  readonly seat: Seat;
-  readonly controlLeaseId: ControlLeaseId;
 }
 
 /**
@@ -37,10 +19,16 @@ export interface SessionLiveness {
   watch(onEnd: () => void): () => void;
 }
 
-/** The only source of actor identity and seats for a connection. */
+/**
+ * The only source of actor identity, seats, and control for a connection.
+ * `games` is what `connection_ready` lists and grants nothing; every seat,
+ * control, and claim decision is asked of `authority`, and the transport
+ * never picks a seat or a lease itself.
+ */
 export interface TrustedSessionContext {
   readonly actorId: PlayerId;
-  readonly grants: readonly GameSeatGrant[];
+  readonly games: readonly SeatListing[];
+  readonly authority: SessionGameAuthority;
   /** Absent for sessions that cannot end while connected (test resolvers). */
   readonly liveness?: SessionLiveness;
 }
@@ -56,21 +44,22 @@ export interface TrustedSessionResolver {
 }
 
 /**
- * Checks a resolver's answer before the transport relies on it: valid ids,
- * a bounded grant list, and one grant per game. A resolver that breaks this
- * is a server defect, not a client error.
+ * Checks a resolver's answer before the transport relies on it: a valid
+ * actor, and a bounded listing with valid ids and one seat per game. A
+ * resolver that breaks this is a server defect, not a client error.
  */
 export function validSession(
   session: TrustedSessionContext,
-  maxGrants: number,
-): ReadonlyMap<GameId, GameSeatGrant> | null {
-  if (!isPlayerId(session.actorId) || session.grants.length > maxGrants) return null;
-  const grants = new Map<GameId, GameSeatGrant>();
-  for (const grant of session.grants) {
-    if (!isGameId(grant.gameId) || !isControlLeaseId(grant.controlLeaseId)) return null;
-    if (grant.seat !== "white" && grant.seat !== "black") return null;
-    if (grants.has(grant.gameId)) return null;
-    grants.set(grant.gameId, Object.freeze({ ...grant }));
+  maxListed: number,
+): readonly SeatListing[] | null {
+  if (!isPlayerId(session.actorId) || session.games.length > maxListed) return null;
+  const seen = new Set<GameId>();
+  const games: SeatListing[] = [];
+  for (const { gameId, seat } of session.games) {
+    if (!isGameId(gameId) || seen.has(gameId)) return null;
+    if (seat !== "white" && seat !== "black") return null;
+    seen.add(gameId);
+    games.push(Object.freeze({ gameId, seat }));
   }
-  return grants;
+  return games;
 }

@@ -98,12 +98,19 @@ const DOMAIN_POLICIES: readonly DomainPolicy[] = [
     allowedPackages: [
       "@chess-one/live-game-runtime",
       "@chess-one/accounts",
+      "@chess-one/game-access",
       "fastify",
       "ws",
       "node:http",
       "node:stream",
     ],
-    allowedDependencies: ["@chess-one/live-game-runtime", "@chess-one/accounts", "fastify", "ws"],
+    allowedDependencies: [
+      "@chess-one/live-game-runtime",
+      "@chess-one/accounts",
+      "@chess-one/game-access",
+      "fastify",
+      "ws",
+    ],
     ambientGrants: [{ names: EDGE_AMBIENT }],
     transport: true,
   },
@@ -137,6 +144,47 @@ const DOMAIN_POLICIES: readonly DomainPolicy[] = [
     allowedDependencies: ["@chess-one/identity", "@chess-one/accounts", "kysely", "pg"],
     ambientGrants: [{ file: "server/accounts-persistence/src/wall-time.ts", names: ["Date"] }],
   },
+  /**
+   * Game access joins identity to seats and control through public
+   * interfaces only: accounts (sessions, standing, the session-end hook)
+   * and the writer runtime (never the core). It generates leases with
+   * `node:crypto` and has no clock of its own. Its adapter knows the
+   * game-access tables and reads the accounts session table it references.
+   */
+  {
+    srcRoot: "server/game-access/src/",
+    allowedPackages: [
+      "@chess-one/accounts",
+      "@chess-one/identity",
+      "@chess-one/live-game-runtime",
+      "node:crypto",
+    ],
+    allowedDependencies: [
+      "@chess-one/accounts",
+      "@chess-one/identity",
+      "@chess-one/live-game-runtime",
+    ],
+  },
+  {
+    srcRoot: "server/game-access-persistence/src/",
+    allowedPackages: [
+      "@chess-one/accounts",
+      "@chess-one/game-access",
+      "@chess-one/live-game-runtime",
+      "kysely",
+      "kysely/migration",
+      "pg",
+      "node:fs/promises",
+      "node:path",
+    ],
+    allowedDependencies: [
+      "@chess-one/accounts",
+      "@chess-one/game-access",
+      "@chess-one/live-game-runtime",
+      "kysely",
+      "pg",
+    ],
+  },
 ];
 
 /** Database access stays on the server: clients never reach the store or its drivers. */
@@ -146,6 +194,7 @@ const CLIENT_FORBIDDEN_PACKAGES = [
   "pg-",
   "@chess-one/live-game-persistence",
   "@chess-one/accounts-persistence",
+  "@chess-one/game-access-persistence",
 ];
 
 /** Clients talk to the server over the wire protocol only, never through its code. */
@@ -154,6 +203,7 @@ const CLIENT_FORBIDDEN_SERVER_PACKAGES = [
   "@chess-one/live-game-runtime",
   "@chess-one/edge",
   "@chess-one/accounts",
+  "@chess-one/game-access",
   "fastify",
   "@fastify/",
 ];

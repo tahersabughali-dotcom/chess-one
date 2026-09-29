@@ -91,12 +91,20 @@ export interface RespondDrawOfferCommandV1 extends CommandEnvelopeInput {
 
 export type DrawOfferDecision = "accept" | "decline";
 
+type WithoutLease<T> = T extends unknown ? Omit<T, "controlLeaseId"> : never;
+
 export type LiveGameCommand =
   | SubmitMoveCommandV1
   | ClaimDrawCommandV1
   | ResignGameCommandV1
   | OfferDrawCommandV1
   | RespondDrawOfferCommandV1;
+
+/**
+ * A command without its control lease: what a client sends, and what a
+ * historical replay is looked up with. The lease is always the server's.
+ */
+export type LeaselessCommand = WithoutLease<LiveGameCommand>;
 
 /** Shape failures, answered as `InvalidState` before any authority or identity check. */
 export type CommandShapeError =

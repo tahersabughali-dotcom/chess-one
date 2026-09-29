@@ -11,6 +11,7 @@ export default defineConfig({
       "tests/live-game-persistence/**/*.db.test.ts",
       "tests/realtime/**/*.db.test.ts",
       "tests/accounts/**/*.db.test.ts",
+      "tests/game-access/**/*.db.test.ts",
     ],
     fileParallelism: false,
     testTimeout: 30_000,

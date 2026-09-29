@@ -29,6 +29,7 @@ export interface EdgeLimits {
   readonly maxConnections: number;
   readonly maxGamesPerConnection: number;
   readonly maxCredentialLength: number;
+  /** Seats a session may list in `connection_ready`; the listing grants nothing. */
   readonly maxGrantsPerSession: number;
   /**
    * How often an open connection rechecks its session in the store. An end

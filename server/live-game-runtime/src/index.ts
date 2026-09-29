@@ -8,12 +8,14 @@ export {
   type CommandResponse,
   type ControlLeaseId,
   type GameId,
+  type GameParticipant,
   type GameResult,
   type GameStatus,
   isClockDomainId,
   isControlLeaseId,
   isGameId,
   isPlayerId,
+  type LeaselessCommand,
   type LiveGameCommand,
   type MonotonicMs,
   OFFER_DRAW_COMMAND_V1,
@@ -28,12 +30,14 @@ export {
   type Seat,
   SUBMIT_MOVE_COMMAND_V1,
   type SubmitMoveCommandV1,
+  type TimeControl,
 } from "@chess-one/live-game";
 export { BoundedQueue } from "./bounded-queue.ts";
 export type { ClockDomain, MonotonicClock, WakeHandle, WakeScheduler } from "./clock.ts";
 export type { FactSink, RetireReason, RuntimeFact } from "./facts.ts";
 export type { ClockView, DrawOfferView, GameView } from "./game-view.ts";
 export {
+  type ControlDirectory,
   type CreateUnconfirmed,
   DEFAULT_RUNTIME_LIMITS,
   GameWriterRegistry,
@@ -49,13 +53,18 @@ export type {
   Activation,
   CommandIngress,
   CommandOutcome,
+  ControlNotHeld,
+  GameControlPort,
   GameSubscriber,
   GameWriterPort,
   IngressRefused,
+  LeaseOutcome,
   RecoveryRequired,
+  ReplayOutcome,
   SubscribeResult,
   SyncIngress,
   SyncOutcome,
+  Unavailable,
   UnavailableReason,
   WriterLimits,
 } from "./writer-port.ts";

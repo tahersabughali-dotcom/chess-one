@@ -41,7 +41,10 @@ export function prepareSession(
   };
 }
 
-/** Records each revocation and tells this process's watchers (open connections) at once. */
+/**
+ * Records each revocation and tells this process's watchers (open
+ * connections) and session end listeners at once, after the store committed.
+ */
 export function announceRevoked(
   context: AccountsContext,
   userId: UserId,
@@ -51,7 +54,7 @@ export function announceRevoked(
   for (const sessionId of sessionIds) {
     context.facts.record({ name: "session_revoked", userId, sessionId, reason });
   }
-  context.revocations.sessionsEnded(sessionIds);
+  if (sessionIds.length > 0) context.revocations.sessionsEnded(userId, sessionIds, reason);
 }
 
 function rejection(
