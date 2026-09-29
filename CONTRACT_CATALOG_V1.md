@@ -342,3 +342,63 @@ When player X flags (6.9) or resigns (5.1.2), let Y be X's opponent. The questio
 **LIVE-CONTRACT-006 (RESOLVED, owner-approved in Batch 6.1):** a new resignation command that arrives after the game has already finished, for example as a dead position under 5.2.2, is answered `GameAlreadyFinished`, a non-binding rejection, not `InvalidState`. Reason: a terminal game state is absorbing, and every new unbound command meets the same terminal guard (2.6.1, LIVE-CONTRACT-004). The `InvalidState` wording in 10.4 is SUPERSEDED.
 
 عند سقوط علم X أو استقالته، يُسأل: هل يستطيع الخصم Y الكش مات بأي سلسلة قانونية؟ نعم مُثبتة: فوز Y. لا مُثبتة: تعادل. غير معروف: `MATING_POSSIBILITY_UNRESOLVED` بلا نتيجة.
+
+## 11. Realtime protocol `chess_one.realtime.v1` / بروتوكول الاتصال الفوري
+
+Added in Phase 1 Batch 9 (2026-09-29), pending review; decisions LIVE-RT-001 to 016. It carries the commands of sections 2 and 10 unchanged; it adds no game rule. Section 3 (reconnect) is realized in part: see 11.6.
+
+### 11.1 Connection / الاتصال
+
+- `GET /realtime`, exact path, no query string, WebSocket upgrade, subprotocol `chess_one.realtime.v1`. The version is fixed for the connection.
+- Refused before the handshake with an HTTP status and a JSON body `{ "code": ... }`: `NOT_FOUND` 404, `BAD_UPGRADE` 400, `UNSUPPORTED_PROTOCOL_VERSION` 400, `ORIGIN_NOT_ALLOWED` 403 (exact allowlist), `CREDENTIAL_TOO_LARGE` 400, `UNAUTHENTICATED` 401, `SESSION_UNAVAILABLE` 503, `SERVER_BUSY` 503, `SERVER_SHUTTING_DOWN` 503.
+- Credentials travel in the upgrade's `Authorization` or `Cookie` header and are resolved by the server's trusted session resolver into an actor and its seat grants (`gameId`, `seat`, `controlLeaseId`). The client never states identity, seat, or lease in a message.
+- The first message must be `hello` within the handshake timeout; the server answers `connection_ready`.
+- Frames: UTF-8 text JSON only, one message per frame, at most the advertised `maxMessageBytes` (4096 by default, never above 16384).
+- Close codes: 1000, 1002, 1008, 1009 only (LIVE-RT-014).
+
+### 11.2 Client messages / رسائل العميل
+
+Flat JSON objects with a `type`; unknown fields are errors; no arrays; depth at most 2. `requestId` and `nonce` are optional, 1 to 64 of `[A-Za-z0-9._:-]`, and are echoed.
+
+| `type` | Fields | Meaning |
+|---|---|---|
+| `hello` | `protocol` = `chess_one.realtime.v1` | Opens the session |
+| `ping` | `nonce?` | Application liveness; answered `pong` |
+| `sync_game` | `requestId?`, `gameId` | Subscribe to a granted game and receive its snapshot |
+| `game_command` | `requestId?`, `command` | One of the five v1 commands of sections 2 and 10, with exactly their fields. Server-owned fields (`received_at`, sequence, SAN, result, clock) are refused as unknown |
+
+### 11.3 Server messages / رسائل الخادم
+
+| `type` | Fields | When |
+|---|---|---|
+| `connection_ready` | `protocol`, `actorId`, `games` (`gameId`, `seat`), `limits` | After `hello` |
+| `game_snapshot` | `requestId`, `snapshot` | Answer to `sync_game` |
+| `game_update` | `snapshot` | After every committed transition, to every subscriber, after the issuer's response |
+| `command_response` | `requestId`, `response` | The decision (section 2.5 codes), sent only after the commit; `replayed` marks a stored response |
+| `recovery_required` | `requestId`, `gameId`, `reason`, `clientCommandId` | Play is paused until an operator recovery, and the request decided nothing. `reason`: `RECOVERY_PAUSED_CLOCK_DOMAIN_CHANGED` (the stored clock anchor belongs to another clock domain), `PERSISTENCE_UNAVAILABLE` (a load, commit, or create failed in this process), `WRITER_FAULT` (the writer hit an unexpected exception; no error text is sent), `CONCURRENCY_OWNERSHIP_UNCERTAIN` (the stored sequence moved under the writer, so another writer may own the game; the database may be healthy; Batch 9.2), or `CREATE_RECONCILIATION_REQUIRED` (a create reported failed could not be confirmed either way; Batch 9.2). `clientCommandId` is the refused command's id, or null; that id stays unbound. Sent with `requestId: null` to every subscriber when an infrastructure pause begins. Balances are the last committed ones, and downtime is never charged (Batch 9.1) |
+| `sync_required` | `gameId`, `reason` = `WRITER_STOPPED` | The client must `sync_game` again |
+| `request_failed` | `requestId`, `code`, `retryable`, `clientCommandId` | `GAME_ACCESS_DENIED`, `GAME_NOT_FOUND`, `GAME_UNAVAILABLE`, `SUBSCRIPTION_LIMIT`, or `TEMPORARILY_UNAVAILABLE` (retryable) |
+| `server_busy` | `requestId`, `code`, `retryable` = true, `clientCommandId` | `RATE_LIMITED`, `WRITER_QUEUE_FULL`, `WRITER_CAPACITY`; the command was not received |
+| `protocol_error` | `code`, `field` | The message was invalid; `field` is a schema field name or null |
+| `pong` | `nonce` | Answer to `ping` |
+
+Four failure families stay distinct: `protocol_error` (the client sent something invalid), a non-`Accepted` `command_response` (a domain decision), `request_failed`/`server_busy` (the server could not serve it now), and `recovery_required`.
+
+### 11.4 `game_snapshot.v1`
+
+A client format, separate from the stored `live_game_state.v1`: `format`, `gameId`, `rulesetId`, `sequence`, `positionFen`, `sideToMove`, `seat` (this connection's), `status` (`active`; `finished` with `resultCode`, `terminationReason`, `winner`, `drawRuleDetails`; or `unresolved` with `reason` and `side`), `playable` (true only while running), `recoveryRequired`, `recoveryReason` (one of the `recovery_required` reasons, or null; Batch 9.1), `clock` (`whiteMs`, `blackMs`, `activeSide`, `running`: balances as of the snapshot, clamped at 0; while paused, the stored balances with `running: false`), and `pendingDrawOffer` (`offerId`, `offeredBy`, `offeredTo`, or null). It never contains a monotonic anchor, `received_at`, binding, fingerprint, control lease, player id, clock domain, or database detail. A `command_response` carries the committed balances the same way, without anchors.
+
+### 11.5 Receipt, order, and delivery / الاستلام والترتيب والتسليم
+
+- A command is received when its game's single writer accepts it into its queue; `received_at` is stamped then by the writer's monotonic clock (LIVE-RT-002). A refused command was not received and may be resent with the same `clientCommandId`.
+- Commands and deadline checks of one game are decided one at a time in receipt order. `received_at <= deadline` is timely (LIVE-RT-005).
+- The issuer gets `command_response` before any subscriber gets the `game_update` of that decision. Per connection and game, state messages never go below a sequence already sent.
+- A connection that cannot keep up is closed (1008), never left open with a gap (LIVE-RT-007). The recovery for any doubt is reconnect and `sync_game`.
+
+### 11.6 Reconnect / إعادة الاتصال
+
+- A disconnect changes nothing: the server clock keeps running and the writer still flags at the deadline (section 3, TransportInterrupted).
+- On reconnect the client sends `hello`, then `sync_game`; the snapshot is the authority (ResyncRequired → Resyncing → ActiveControlled for a granted seat). An uncertain command is resent with the same `clientCommandId` and replays.
+- Not realized yet: ViewOnly, LeaseSuperseded, lease takeover, and AbandonmentEvaluation (LIVE-MULTI-CONNECTION-001, LIVE-VIEW-ONLY-001).
+
+الاتصال عبر WebSocket بالبروتوكول الفرعي `chess_one.realtime.v1`. الهوية والمقعد وعقد التحكم من الجلسة الموثوقة فقط. زمن الاستلام يختمه كاتب اللعبة الوحيد عند قبول الأمر في طابوره. الرد يسبق التحديث، ولا يُرسل تسلسل أقل مما أُرسل. عند الشك: إعادة اتصال ثم مزامنة.

@@ -7,7 +7,7 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     name: "persistence-db",
-    include: ["tests/live-game-persistence/**/*.db.test.ts"],
+    include: ["tests/live-game-persistence/**/*.db.test.ts", "tests/realtime/**/*.db.test.ts"],
     fileParallelism: false,
     testTimeout: 30_000,
     hookTimeout: 30_000,

@@ -1,0 +1,641 @@
+import { err } from "@chess-one/game-values";
+import {
+  type ActiveGameState,
+  type AuthorizedGameActor,
+  type ExecutionError,
+  executeCommand,
+  executeDeadline,
+  type GameId,
+  gameCondition,
+  type LiveGameCommand,
+  type LiveGameRepository,
+  type LiveGameWriter,
+  type LoadError,
+  loadForWriter,
+  type MonotonicMs,
+} from "@chess-one/live-game";
+import { BoundedQueue } from "./bounded-queue.ts";
+import type { MonotonicClock, WakeHandle, WakeScheduler } from "./clock.ts";
+import { DeadlineWatch, lateInstant } from "./deadline-watch.ts";
+import type { FactSink, RetireReason, RuntimeFact } from "./facts.ts";
+import { type GameView, viewOf } from "./game-view.ts";
+import {
+  type Activation,
+  activationOf,
+  type CommandIngress,
+  type CommandOutcome,
+  type GameSubscriber,
+  type GameWriterPort,
+  type IngressRefused,
+  type RecoveryRequired,
+  type SubscribeResult,
+  type SyncIngress,
+  type SyncOutcome,
+  type Unavailable,
+  type UnavailableReason,
+  type WriterLimits,
+} from "./writer-port.ts";
+import {
+  effectiveCondition,
+  type InfrastructurePauses,
+  type InfrastructureReason,
+  infrastructurePaused,
+  type RecoveryReason,
+  type WriterCondition,
+} from "./writer-recovery.ts";
+
+type Job =
+  | {
+      readonly kind: "command";
+      readonly actor: AuthorizedGameActor;
+      readonly command: LiveGameCommand;
+      readonly receivedAt: MonotonicMs;
+      readonly reply: (outcome: CommandOutcome) => void;
+    }
+  | { readonly kind: "sync"; readonly reply: (outcome: SyncOutcome) => void }
+  | { readonly kind: "deadline"; readonly observedAt: MonotonicMs };
+
+export interface WriterRuntimeOptions {
+  readonly gameId: GameId;
+  readonly writer: LiveGameWriter;
+  readonly clock: MonotonicClock;
+  readonly scheduler: WakeScheduler;
+  readonly limits: WriterLimits;
+  readonly facts: FactSink<RuntimeFact>;
+  /** Shared by every writer of the registry; a pause outlives its writer. */
+  readonly pauses: InfrastructurePauses;
+  /** Receives unexpected exceptions; the writer has already stopped or dropped the culprit. */
+  readonly reportDefect: (error: unknown) => void;
+  readonly onRetired: (runtime: GameWriterRuntime, reason: RetireReason) => void;
+}
+
+const QUEUE_FULL: IngressRefused = Object.freeze({ accepted: false, reason: "queue_full" });
+const STOPPED: IngressRefused = Object.freeze({ accepted: false, reason: "writer_stopped" });
+const SYNC_ACCEPTED: SyncIngress = Object.freeze({ accepted: true });
+
+function unavailable(reason: UnavailableReason): Unavailable {
+  return Object.freeze({ kind: "unavailable", reason });
+}
+
+/** Each request is answered at most once, whatever path answers it. */
+function once<T>(reply: (outcome: T) => void): (outcome: T) => void {
+  let answered = false;
+  return (outcome) => {
+    if (answered) return;
+    answered = true;
+    reply(outcome);
+  };
+}
+
+/**
+ * The one authoritative writer of one game in this process
+ * (LIVE-WRITER-OWNERSHIP-001: in-process only). Every command, sync, and
+ * deadline check passes through one bounded FIFO and runs one at a time, so
+ * processing order is the order of the monotonic stamps. State is loaded
+ * from the repository for every job; the writer keeps only the last sequence
+ * it published and the condition it last observed.
+ */
+export class GameWriterRuntime implements GameWriterPort {
+  readonly gameId: GameId;
+  readonly #writer: LiveGameWriter;
+  readonly #clock: MonotonicClock;
+  readonly #scheduler: WakeScheduler;
+  readonly #limits: WriterLimits;
+  readonly #facts: FactSink<RuntimeFact>;
+  readonly #pauses: InfrastructurePauses;
+  readonly #reportDefect: (error: unknown) => void;
+  readonly #onRetired: (runtime: GameWriterRuntime, reason: RetireReason) => void;
+  /** One slot beyond the request limit is reserved for the single deadline check. */
+  readonly #queue: BoundedQueue<Job>;
+  readonly #subscribers = new Set<GameSubscriber>();
+  readonly #deadline: DeadlineWatch;
+  #status: "active" | "stopping" | "stopped" = "active";
+  #stopReason: RetireReason | null = null;
+  #requests = 0;
+  #deadlineQueued = false;
+  #busy = false;
+  #current: Job | null = null;
+  #draining: Promise<void> = Promise.resolve();
+  #loaded = false;
+  /** Null until the first successful load, unless the registry already holds a pause. */
+  #condition: WriterCondition | null;
+  #lastPublished = -1;
+  /** The stored sequence the job in progress read. */
+  #lastLoaded = -1;
+  #lastLoadFailure: Unavailable | RecoveryRequired = unavailable("temporarily_unavailable");
+  #idleTimer: WakeHandle | null = null;
+
+  constructor(options: WriterRuntimeOptions) {
+    this.gameId = options.gameId;
+    this.#writer = Object.freeze({
+      clockDomainId: options.writer.clockDomainId,
+      repository: this.#owned(options.writer.repository),
+    });
+    this.#clock = options.clock;
+    this.#scheduler = options.scheduler;
+    this.#limits = options.limits;
+    this.#facts = options.facts;
+    this.#pauses = options.pauses;
+    this.#reportDefect = options.reportDefect;
+    this.#onRetired = options.onRetired;
+    this.#queue = new BoundedQueue<Job>(options.limits.maxQueuedRequests + 1);
+    this.#deadline = new DeadlineWatch(options.clock, options.scheduler, () =>
+      this.#deadlineWake(),
+    );
+    const paused = options.pauses.reasonOf(options.gameId);
+    this.#condition = paused === undefined ? null : infrastructurePaused(paused);
+  }
+
+  get subscriberCount(): number {
+    return this.#subscribers.size;
+  }
+
+  get queuedRequests(): number {
+    return this.#requests;
+  }
+
+  get stopped(): boolean {
+    return this.#status !== "active";
+  }
+
+  /** True while a wake-up or a queued check waits for the running clock's deadline. */
+  get deadlineArmed(): boolean {
+    return this.#deadline.armed || this.#deadlineQueued;
+  }
+
+  /** The condition this writer serves, or null before its first load. */
+  get condition(): WriterCondition | null {
+    return this.#condition;
+  }
+
+  subscribe(subscriber: GameSubscriber): SubscribeResult {
+    if (this.#status !== "active") return "writer_stopped";
+    if (this.#subscribers.has(subscriber)) return "already_subscribed";
+    if (this.#subscribers.size >= this.#limits.maxSubscribers) return "limit_reached";
+    this.#subscribers.add(subscriber);
+    this.#cancelIdle();
+    return "subscribed";
+  }
+
+  unsubscribe(subscriber: GameSubscriber): void {
+    if (this.#subscribers.delete(subscriber)) this.#considerRetiring();
+  }
+
+  /**
+   * While play is paused a command is refused before it is stamped: it is
+   * not received, reaches no queue, touches no repository, and its command id
+   * stays unbound.
+   */
+  submitCommand(
+    actor: AuthorizedGameActor,
+    command: LiveGameCommand,
+    reply: (outcome: CommandOutcome) => void,
+  ): CommandIngress {
+    if (actor.gameId !== this.gameId)
+      throw new Error("Writer runtime defect: actor of another game");
+    if (this.#status === "active" && this.#condition?.kind === "infrastructure_paused") {
+      this.#facts.record({ name: "command_refused_paused", gameId: this.gameId });
+      return Object.freeze({
+        accepted: false,
+        reason: "infrastructure_paused",
+        recovery: this.#condition.reason,
+      });
+    }
+    const refused = this.#refusal();
+    if (refused !== null) return refused;
+    const receivedAt = this.#clock.now();
+    this.#enqueue({ kind: "command", actor, command, receivedAt, reply: once(reply) });
+    return Object.freeze({ accepted: true, receivedAt });
+  }
+
+  /** A sync is served while paused: it reads, and never changes the game. */
+  requestSync(reply: (outcome: SyncOutcome) => void): SyncIngress {
+    const refused = this.#refusal();
+    if (refused !== null) return refused;
+    this.#enqueue({ kind: "sync", reply: once(reply) });
+    return SYNC_ACCEPTED;
+  }
+
+  /**
+   * LIVE-WRITER-ACTIVATION-001: loads the game now, with no connection or
+   * command, and arms the deadline of a running clock. Idempotent: the
+   * deadline instant already armed keeps its one timer.
+   */
+  activate(): Promise<Activation> {
+    return new Promise((resolve) => {
+      const ingress = this.requestSync((outcome) => resolve(activationOf(outcome)));
+      if (!ingress.accepted)
+        resolve(Object.freeze({ kind: "unavailable", reason: ingress.reason }));
+    });
+  }
+
+  /** Stops play after an infrastructure failure seen outside this writer's jobs. */
+  pause(reason: InfrastructureReason): void {
+    if (this.#status === "active" && this.#pausable()) this.#pause(reason);
+  }
+
+  /**
+   * Refuses new work, lets the job in progress finish so its outcome is
+   * settled before the writer lets go, and answers every waiting request
+   * `temporarily_unavailable`.
+   */
+  async dispose(): Promise<void> {
+    if (this.#status === "active") {
+      this.#stopReason = "disposed";
+      this.#status = "stopping";
+      this.#deadline.disarm();
+      this.#cancelIdle();
+      if (!this.#busy) this.#stop();
+    }
+    await this.#draining;
+  }
+
+  /**
+   * The repository as this writer uses it. Every load records the sequence
+   * it read, and a commit is only passed on when it builds on the sequence
+   * this writer last published: one built on someone else's write is
+   * refused as a concurrency conflict before it reaches the database.
+   */
+  #owned(inner: LiveGameRepository): LiveGameRepository {
+    const owned: LiveGameRepository = {
+      loadGame: async (gameId) => {
+        const loaded = await inner.loadGame(gameId);
+        if (loaded.ok) this.#lastLoaded = loaded.value.state.sequence;
+        return loaded;
+      },
+      createGame: (state, clockDomainId) => inner.createGame(state, clockDomainId),
+      commitDecision: async (plan, clockDomainId) => {
+        if (plan.expectedSequence !== this.#lastPublished) {
+          return err({ kind: "concurrency_conflict", expectedSequence: plan.expectedSequence });
+        }
+        return inner.commitDecision(plan, clockDomainId);
+      },
+    };
+    return Object.freeze(owned);
+  }
+
+  /** The job in progress decided on a sequence this writer never published. */
+  #foreignLoad(): boolean {
+    return this.#lastLoaded !== this.#lastPublished;
+  }
+
+  #refusal(): IngressRefused | null {
+    if (this.#status !== "active") return STOPPED;
+    if (this.#requests >= this.#limits.maxQueuedRequests) {
+      this.#facts.record({ name: "writer_queue_full", gameId: this.gameId });
+      return QUEUE_FULL;
+    }
+    return null;
+  }
+
+  #enqueue(job: Job): void {
+    if (!this.#queue.offer(job)) throw new Error("Writer runtime defect: reserved queue slot");
+    if (job.kind === "deadline") this.#deadlineQueued = true;
+    else this.#requests += 1;
+    this.#cancelIdle();
+    if (!this.#busy) {
+      this.#busy = true;
+      this.#draining = this.#drain();
+    }
+  }
+
+  async #drain(): Promise<void> {
+    try {
+      for (let job = this.#queue.shift(); job !== undefined; job = this.#queue.shift()) {
+        if (job.kind === "deadline") this.#deadlineQueued = false;
+        if (this.#status !== "active") {
+          this.#release(job, true);
+          continue;
+        }
+        this.#current = job;
+        await this.#run(job);
+        this.#current = null;
+        this.#release(job, false);
+      }
+    } catch (error: unknown) {
+      const job = this.#current;
+      this.#current = null;
+      this.#facts.record({ name: "writer_fault", gameId: this.gameId, job: job?.kind ?? "none" });
+      if (this.#pausable()) this.#pause("WRITER_FAULT");
+      if (job !== null) this.#release(job, true);
+      this.#stopReason ??= "defect";
+      this.#stop();
+      this.#reportDefect(error);
+    } finally {
+      this.#busy = false;
+    }
+    if (this.#status === "stopping") this.#stop();
+    else this.#considerRetiring();
+  }
+
+  /**
+   * Bookkeeping when a job leaves the writer. `refuse` answers a command
+   * `recovery_required` while play is paused, and anything else unavailable.
+   */
+  #release(job: Job, refuse: boolean): void {
+    if (job.kind === "deadline") return;
+    this.#requests -= 1;
+    if (!refuse) return;
+    if (job.kind === "command" && this.#condition?.kind === "infrastructure_paused") {
+      job.reply(this.#recoveryRequired(this.#condition.reason));
+      return;
+    }
+    job.reply(unavailable("temporarily_unavailable"));
+  }
+
+  async #run(job: Job): Promise<void> {
+    if (job.kind === "sync") {
+      await this.#refresh(job.reply);
+      return;
+    }
+    const paused = this.#condition?.kind === "infrastructure_paused" ? this.#condition : null;
+    if (paused !== null) {
+      if (job.kind === "command") job.reply(this.#recoveryRequired(paused.reason));
+      return;
+    }
+    if (!this.#loaded && !(await this.#refresh(null))) {
+      if (job.kind === "command") job.reply(this.#lastLoadFailure);
+      return;
+    }
+    if (job.kind === "command") await this.#runCommand(job);
+    else await this.#runDeadline(job.observedAt);
+  }
+
+  /**
+   * Loads the stored game, adopts it, and answers `reply` with its view.
+   * Between its own jobs the stored sequence is the last one this writer
+   * published: a bound rejection or a replay keeps it, and a failed commit
+   * pauses play. So in play, any other stored sequence was written by
+   * someone else, and a paused writer may only see its own commit whose
+   * outcome the driver could not report land (one ahead, published).
+   */
+  async #refresh(reply: ((outcome: SyncOutcome) => void) | null): Promise<boolean> {
+    const loaded = await loadForWriter(this.#writer, this.gameId);
+    if (!loaded.ok) {
+      this.#lastLoadFailure = this.#loadFailed(loaded.error);
+      reply?.(this.#lastLoadFailure);
+      return false;
+    }
+    const { state } = loaded.value;
+    const paused = this.#condition?.kind === "infrastructure_paused";
+    const moved = paused
+      ? state.sequence < this.#lastPublished
+      : state.sequence !== this.#lastPublished;
+    if (this.#loaded && moved) {
+      reply?.(this.#ownershipConflict("load"));
+      return false;
+    }
+    const condition = effectiveCondition(
+      loaded.value.condition,
+      this.#pauses.reasonOf(this.gameId),
+    );
+    this.#observe(condition);
+    const view = viewOf(state, condition, this.#clock.now());
+    if (state.sequence > this.#lastPublished) {
+      if (this.#loaded) this.#publish(state.sequence, view);
+      else this.#lastPublished = state.sequence;
+    }
+    this.#loaded = true;
+    reply?.(Object.freeze({ kind: "snapshot", view }));
+    this.#arm(state, condition);
+    return true;
+  }
+
+  #loadFailed(error: LoadError): Unavailable | RecoveryRequired {
+    switch (error.kind) {
+      case "persistence_failure":
+        return this.#persistenceFailed("load");
+      case "game_not_found":
+        this.#stopAfterCurrent("game_not_found");
+        return unavailable("game_not_found");
+      case "corrupt_state":
+        this.#stopAfterCurrent("corrupt_state");
+        return unavailable("game_corrupt");
+    }
+  }
+
+  async #runCommand(job: Extract<Job, { kind: "command" }>): Promise<void> {
+    const result = await executeCommand(this.#writer, job.actor, job.command, {
+      receivedAtMonotonicMs: job.receivedAt,
+    });
+    if (!result.ok) {
+      job.reply(this.#executionFailed(result.error));
+      return;
+    }
+    if (this.#foreignLoad()) {
+      job.reply(this.#ownershipConflict("load"));
+      return;
+    }
+    const { nextState, response } = result.value.decision;
+    job.reply(Object.freeze({ kind: "decided", response }));
+    if (response.replayedResponse) {
+      this.#facts.record({ name: "command_replayed", gameId: this.gameId });
+    } else if (response.code === "Accepted") {
+      this.#facts.record({ name: "command_accepted", gameId: this.gameId });
+    } else {
+      this.#facts.record({ name: "command_rejected", gameId: this.gameId, code: response.code });
+    }
+    this.#adopt(nextState);
+  }
+
+  async #runDeadline(observedAt: MonotonicMs): Promise<void> {
+    const result = await executeDeadline(this.#writer, this.gameId, observedAt);
+    if (!result.ok) {
+      this.#executionFailed(result.error);
+      return;
+    }
+    if (this.#foreignLoad()) {
+      this.#ownershipConflict("load");
+      return;
+    }
+    const { decision } = result.value;
+    if (decision.flagged) this.#facts.record({ name: "deadline_flagged", gameId: this.gameId });
+    this.#adopt(decision.nextState);
+  }
+
+  /**
+   * A state this writer just decided. Only a sequence step is a transition
+   * this writer committed, in its own clock domain; a replay, a rejection, or
+   * a bound rejection leaves the observed condition alone.
+   */
+  #adopt(state: ActiveGameState): void {
+    if (state.sequence > this.#lastPublished) {
+      const domain = this.#writer.clockDomainId;
+      const condition = gameCondition({ state, clockDomainId: domain }, domain);
+      this.#observe(condition);
+      this.#publish(state.sequence, viewOf(state, condition, this.#clock.now()));
+    }
+    if (this.#condition !== null) this.#arm(state, this.#condition);
+  }
+
+  #executionFailed(error: ExecutionError): CommandOutcome {
+    switch (error.kind) {
+      case "recovery_paused":
+        this.#observe(error);
+        this.#deadline.disarm();
+        return this.#recoveryRequired(error.reason);
+      case "concurrency_conflict":
+        return this.#ownershipConflict(this.#foreignLoad() ? "load" : "commit");
+      case "persistence_failure":
+        return this.#persistenceFailed(error.operation);
+      case "game_not_found":
+      case "corrupt_state":
+        return this.#loadFailed(error);
+    }
+  }
+
+  /**
+   * LIVE-RETRY-RECEIPT-001: a failed load or commit decided nothing, and play
+   * stops at the last durable state and balances. A game already known to be
+   * stopped (finished, unresolved, or paused for its clock domain) has no
+   * clock to protect and is only answered as unavailable.
+   */
+  #persistenceFailed(operation: "load" | "create" | "commit"): Unavailable | RecoveryRequired {
+    this.#facts.record({ name: "persistence_failure", gameId: this.gameId, operation });
+    if (!this.#pausable()) return unavailable("temporarily_unavailable");
+    this.#pause("PERSISTENCE_UNAVAILABLE");
+    return this.#recoveryRequired(this.#pauses.reasonOf(this.gameId) ?? "PERSISTENCE_UNAVAILABLE");
+  }
+
+  /**
+   * LIVE-WRITER-OWNERSHIP-001: the stored sequence moved under this writer,
+   * so another writer may own the game. Nothing is retried or overwritten and
+   * nothing is charged: play stops at the stored state for every condition,
+   * subscribers are told recovery is required and then to sync, and the
+   * writer stops. Nothing replaces it by itself; a later request finds the
+   * game paused until an approved ownership recovery
+   * (LIVE-RECOVERY-RESUME-001).
+   */
+  #ownershipConflict(detectedBy: "commit" | "load"): RecoveryRequired {
+    this.#facts.record({ name: "concurrency_conflict", gameId: this.gameId, detectedBy });
+    this.#pause("CONCURRENCY_OWNERSHIP_UNCERTAIN");
+    this.#stopAfterCurrent("concurrency_conflict");
+    return this.#recoveryRequired("CONCURRENCY_OWNERSHIP_UNCERTAIN");
+  }
+
+  #pausable(): boolean {
+    const kind = this.#condition?.kind;
+    return kind === undefined || kind === "running" || kind === "infrastructure_paused";
+  }
+
+  /**
+   * Stops play: no deadline check runs, queued commands are answered
+   * `recovery_required`, and subscribers are told once. Nothing is written.
+   */
+  #pause(reason: InfrastructureReason): void {
+    const entered = this.#pauses.add(this.gameId, reason);
+    this.#condition = infrastructurePaused(this.#pauses.reasonOf(this.gameId) ?? reason);
+    this.#deadline.disarm();
+    if (!entered) return;
+    this.#facts.record({ name: "infrastructure_pause_entered", gameId: this.gameId, reason });
+    this.#notify((subscriber) => subscriber.onRecoveryRequired(this.gameId, reason));
+  }
+
+  #recoveryRequired(reason: RecoveryReason): RecoveryRequired {
+    return Object.freeze({ kind: "recovery_required", gameId: this.gameId, reason });
+  }
+
+  #observe(condition: WriterCondition): void {
+    if (condition.kind === "recovery_paused" && this.#condition?.kind !== "recovery_paused") {
+      this.#facts.record({ name: "recovery_pause_encountered", gameId: this.gameId });
+    }
+    this.#condition = condition;
+  }
+
+  #publish(sequence: number, view: GameView): void {
+    this.#lastPublished = sequence;
+    this.#notify((subscriber) => subscriber.onUpdate(view));
+  }
+
+  /** Calls every subscriber in order; one that throws is dropped and reported. */
+  #notify(call: (subscriber: GameSubscriber) => void): void {
+    for (const subscriber of [...this.#subscribers]) {
+      try {
+        call(subscriber);
+      } catch (error: unknown) {
+        this.#subscribers.delete(subscriber);
+        this.#facts.record({ name: "subscriber_defect", gameId: this.gameId });
+        this.#reportDefect(error);
+      }
+    }
+  }
+
+  /**
+   * Only a running clock in play is watched. The wake only queues a deadline
+   * check stamped with the clock reading at wake time; an early wake finds
+   * the clock in time and arms again.
+   */
+  #arm(state: ActiveGameState, condition: WriterCondition): void {
+    if (condition.kind !== "running" || !state.clock.running || this.#status !== "active") {
+      this.#deadline.disarm();
+      return;
+    }
+    if (!this.#deadlineQueued) this.#deadline.arm(lateInstant(state.clock));
+  }
+
+  #deadlineWake(): void {
+    if (this.#status !== "active" || this.#deadlineQueued) return;
+    if (this.#condition?.kind === "infrastructure_paused") return;
+    this.#enqueue({ kind: "deadline", observedAt: this.#clock.now() });
+  }
+
+  #cancelIdle(): void {
+    this.#idleTimer?.cancel();
+    this.#idleTimer = null;
+  }
+
+  /** A running clock keeps its writer; otherwise an idle writer is retired later. */
+  #considerRetiring(): void {
+    if (!this.#retirable() || this.#idleTimer !== null) return;
+    this.#idleTimer = this.#scheduler.wakeAfter(this.#limits.idleRetireMs, () => {
+      this.#idleTimer = null;
+      if (!this.#retirable()) return;
+      this.#stopReason = "idle";
+      this.#stop();
+    });
+  }
+
+  #retirable(): boolean {
+    return (
+      this.#status === "active" &&
+      !this.#busy &&
+      this.#queue.size === 0 &&
+      this.#subscribers.size === 0 &&
+      this.#condition?.kind !== "running"
+    );
+  }
+
+  /** Stops once the job in progress has answered. */
+  #stopAfterCurrent(reason: RetireReason): void {
+    this.#stopReason ??= reason;
+    if (this.#status === "active") this.#status = "stopping";
+    this.#deadline.disarm();
+  }
+
+  /**
+   * Final: answers every waiting request, tells subscribers to sync again,
+   * cancels every timer, and leaves the registry.
+   */
+  #stop(): void {
+    if (this.#status === "stopped") return;
+    this.#status = "stopped";
+    this.#deadline.disarm();
+    this.#cancelIdle();
+    for (let job = this.#queue.shift(); job !== undefined; job = this.#queue.shift()) {
+      this.#release(job, true);
+    }
+    this.#deadlineQueued = false;
+    const subscribers = [...this.#subscribers];
+    this.#subscribers.clear();
+    for (const subscriber of subscribers) {
+      try {
+        subscriber.onWriterStopped(this.gameId);
+      } catch (error: unknown) {
+        this.#reportDefect(error);
+      }
+    }
+    const reason = this.#stopReason ?? "defect";
+    this.#facts.record({ name: "writer_retired", gameId: this.gameId, reason });
+    this.#onRetired(this, reason);
+  }
+}

@@ -38,6 +38,8 @@ describe("TST-BOUNDARY root scripts", () => {
       "domain/chess-rules",
       "server/live-game",
       "server/live-game-persistence",
+      "server/live-game-runtime",
+      "server/edge",
     ]) {
       expect(typecheck, project).toContain(`tsc -p ${project}`);
     }
@@ -57,6 +59,30 @@ describe("TST-BOUNDARY database integration wiring", () => {
     );
     expect(suite).not.toMatch(/\.(skip|todo|only)\b|skipIf|runIf/);
     expect(suite).toContain("BLOCKED by environment");
+  });
+
+  it("TST-BOUNDARY-033 realtime tests run in test (local) and test:realtime (with PostgreSQL); none can skip", () => {
+    expect(script("test:realtime")).toBe("vitest run --config vitest.realtime.config.ts");
+    expect(script("check")).not.toContain("test:realtime");
+    const read = (path: string): string =>
+      readFileSync(fileURLToPath(new URL(path, import.meta.url)), "utf8");
+    expect(read("../../vitest.realtime.config.ts")).toContain(
+      'include: ["tests/realtime/**/*.test.ts"]',
+    );
+    expect(read("../../vitest.db.config.ts")).toContain('"tests/realtime/**/*.db.test.ts"');
+    for (const suite of [
+      "../realtime/realtime.db.test.ts",
+      "../realtime/edge.test.ts",
+      "../realtime/edge-config.test.ts",
+      "../realtime/protocol.test.ts",
+      "../realtime/writer-runtime.test.ts",
+    ]) {
+      expect(read(suite), suite).not.toMatch(/\.(skip|todo|only)\b|skipIf|runIf/);
+    }
+    expect(read("../realtime/realtime.db.test.ts")).toContain("withDisposableSchema");
+    expect(read("../live-game-persistence/support/disposable-schema.ts")).toContain(
+      "BLOCKED by environment",
+    );
   });
 });
 

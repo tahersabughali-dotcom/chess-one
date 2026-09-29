@@ -440,3 +440,174 @@ describe("TST-BOUNDARY dependency boundaries", () => {
     ).toEqual(["client_imports_persistence", "client_imports_persistence"]);
   });
 });
+
+const rt = (name: string, content: string): SourceFile => ({
+  path: `server/live-game-runtime/src/${name}`,
+  content,
+});
+const edge = (name: string, content: string): SourceFile => ({
+  path: `server/edge/src/${name}`,
+  content,
+});
+
+describe("TST-BOUNDARY realtime layers", () => {
+  it("TST-BOUNDARY-029 no transport stack below the edge: rules, values, core, persistence, and runtime", () => {
+    const persistence = (name: string, content: string): SourceFile => ({
+      path: `server/live-game-persistence/src/${name}`,
+      content,
+    });
+    const layers = [gv, cr, lg, rt, persistence];
+    for (const layer of layers) {
+      for (const code of [
+        'import Fastify from "fastify";',
+        'import websocket from "@fastify/websocket";',
+        'import { WebSocketServer } from "ws";',
+        'import { createServer } from "node:http";',
+        'import { Socket } from "node:net";',
+        'import { createRealtimeEdge } from "@chess-one/edge";',
+      ]) {
+        const rules = rulesFor(layer("a.ts", code));
+        expect(rules, `${layer("a.ts", "").path} ${code}`).toContain("transport_in_core");
+        expect(rules).toContain("forbidden_import");
+      }
+    }
+  });
+
+  it("TST-BOUNDARY-030 the runtime sees only core packages; its clock and timers live in system.ts alone", () => {
+    expect(rulesFor(rt("a.ts", 'import { executeCommand } from "@chess-one/live-game";'))).toEqual(
+      [],
+    );
+    for (const code of [
+      'import { PostgresLiveGameRepository } from "@chess-one/live-game-persistence";',
+      'import { Kysely } from "kysely";',
+      'import Redis from "ioredis";',
+      'import { readFile } from "node:fs/promises";',
+    ]) {
+      expect(rulesFor(rt("a.ts", code)), code).toContain("forbidden_import");
+    }
+    for (const code of [
+      "const t = process.hrtime.bigint();",
+      "const id = crypto.randomUUID();",
+      "setTimeout(() => undefined, 1);",
+      "const t = Date.now();",
+      "const t = performance.now();",
+    ]) {
+      expect(rulesFor(rt("writer-runtime.ts", code)), code).toContain("ambient_access");
+    }
+    expect(
+      rulesFor(
+        rt(
+          "system.ts",
+          "const t = process.hrtime.bigint(); const id = crypto.randomUUID(); clearTimeout(setTimeout(() => undefined, 1));",
+        ),
+      ),
+    ).toEqual([]);
+    for (const code of [
+      "const t = Date.now();",
+      "const e = process.env.X;",
+      "const r = Math.random();",
+    ]) {
+      expect(rulesFor(rt("system.ts", code)), code).toContain("ambient_access");
+    }
+  });
+
+  it("TST-BOUNDARY-031 the edge reaches the game only through the runtime and has no clock, environment, or randomness", () => {
+    for (const code of [
+      'import Fastify from "fastify";',
+      'import { WebSocketServer } from "ws";',
+      'import type { IncomingMessage } from "node:http";',
+      'import type { Duplex } from "node:stream";',
+      'import { GameWriterRegistry } from "@chess-one/live-game-runtime";',
+    ]) {
+      expect(rulesFor(edge("a.ts", code)), code).toEqual([]);
+    }
+    for (const code of [
+      'import { processCommand } from "@chess-one/live-game";',
+      'import { PostgresLiveGameRepository } from "@chess-one/live-game-persistence";',
+      'import pg from "pg";',
+      'import Redis from "ioredis";',
+      'import { readFile } from "node:fs/promises";',
+      'import websocket from "@fastify/websocket";',
+    ]) {
+      expect(rulesFor(edge("a.ts", code)), code).toContain("forbidden_import");
+    }
+    expect(rulesFor(edge("a.ts", "clearTimeout(setTimeout(() => undefined, 1));"))).toEqual([]);
+    for (const code of [
+      "const t = Date.now();",
+      "const t = process.hrtime.bigint();",
+      "const e = process.env.ORIGINS;",
+      "const r = Math.random();",
+      'console.log("x");',
+    ]) {
+      expect(rulesFor(edge("a.ts", code)), code).toContain("ambient_access");
+    }
+    const manifest = (dependencies: Record<string, string>): SourceFile => ({
+      path: "server/edge/package.json",
+      content: JSON.stringify({ exports: { ".": "./src/index.ts" }, dependencies }),
+    });
+    expect(
+      rulesFor(
+        manifest({
+          "@chess-one/live-game-runtime": "workspace:*",
+          fastify: "5.12.5",
+          ws: "8.22.0",
+        }),
+      ),
+    ).toEqual([]);
+    for (const name of [
+      "@chess-one/live-game",
+      "@fastify/websocket",
+      "socket.io",
+      "ioredis",
+      "pg",
+    ]) {
+      expect(rulesFor(manifest({ [name]: "1.0.0" })), name).not.toEqual([]);
+    }
+  });
+
+  it("TST-BOUNDARY-032 clients talk to the server over the wire only: no server package, runtime, edge, or Fastify", () => {
+    const client = (content: string): SourceFile => ({ path: "clients/web/src/a.ts", content });
+    for (const code of [
+      'import { processCommand } from "@chess-one/live-game";',
+      'import { GameWriterRegistry } from "@chess-one/live-game-runtime";',
+      'import { createRealtimeEdge } from "@chess-one/edge";',
+      'import Fastify from "fastify";',
+      'import { x } from "../../../server/edge/src/index.ts";',
+    ]) {
+      expect(rulesFor(client(code)), code).toContain("client_imports_server");
+    }
+    expect(
+      rulesFor({
+        path: "clients/web/package.json",
+        content: JSON.stringify({ dependencies: { "@chess-one/edge": "workspace:*" } }),
+      }),
+    ).toContain("client_imports_server");
+  });
+
+  it("TST-BOUNDARY-034 no server code but the runtime and the store adapter reaches the core, so no game plays without an activated writer", () => {
+    const server = (path: string, content: string): SourceFile => ({ path, content });
+    const core = 'import { startGame, executeCommand } from "@chess-one/live-game";';
+    for (const path of [
+      "server/matchmaking/src/pairing.ts",
+      "server/admin/src/start.ts",
+      "server/edge/src/a.ts",
+    ]) {
+      expect(rulesFor(server(path, core)), path).toContain("writer_bypass");
+    }
+    for (const path of [
+      "server/live-game-runtime/src/registry.ts",
+      "server/live-game-persistence/src/repository.ts",
+      "server/live-game/src/persistence/writer.ts",
+    ]) {
+      expect(rulesFor(server(path, core)), path).not.toContain("writer_bypass");
+    }
+    expect(
+      rulesFor(
+        server(
+          "server/matchmaking/src/pairing.ts",
+          'import { GameWriterRegistry } from "@chess-one/live-game-runtime";',
+        ),
+      ),
+    ).toEqual([]);
+  });
+});

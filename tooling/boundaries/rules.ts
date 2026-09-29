@@ -18,16 +18,33 @@ interface PackageManifest {
   readonly exportKeys: readonly string[];
 }
 
+/**
+ * An exception to the ambient-access ban: `name` allows any use of a global,
+ * `name.member` only that member. With `file` it holds in that file alone.
+ */
+interface AmbientGrant {
+  readonly file?: string;
+  readonly names: readonly string[];
+}
+
 interface DomainPolicy {
   readonly srcRoot: string;
   readonly allowedPackages: readonly string[];
   readonly allowedDependencies: readonly string[];
+  readonly ambientGrants?: readonly AmbientGrant[];
+  /** Only the edge may reach an HTTP or WebSocket stack. */
+  readonly transport?: true;
 }
+
+const EDGE_AMBIENT = ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "WebSocket"];
 
 /**
  * Source roots with a closed import set and the ambient-access ban. The
  * persistence adapter is included: it gets its pool and file paths from the
- * host, so it needs no environment, clock, or global I/O either.
+ * host, so it needs no environment, clock, or global I/O either. The runtime
+ * reads the monotonic clock and arms timers in one infrastructure file; the
+ * edge may use timers for heartbeats and timeouts and name its WebSocket
+ * type, never a clock, environment, or console of its own.
  */
 const DOMAIN_POLICIES: readonly DomainPolicy[] = [
   { srcRoot: "domain/game-values/src/", allowedPackages: [], allowedDependencies: [] },
@@ -61,10 +78,73 @@ const DOMAIN_POLICIES: readonly DomainPolicy[] = [
       "pg",
     ],
   },
+  {
+    srcRoot: "server/live-game-runtime/src/",
+    allowedPackages: ["@chess-one/game-values", "@chess-one/chess-rules", "@chess-one/live-game"],
+    allowedDependencies: [
+      "@chess-one/game-values",
+      "@chess-one/chess-rules",
+      "@chess-one/live-game",
+    ],
+    ambientGrants: [
+      {
+        file: "server/live-game-runtime/src/system.ts",
+        names: ["process.hrtime", "crypto.randomUUID", "setTimeout", "clearTimeout"],
+      },
+    ],
+  },
+  {
+    srcRoot: "server/edge/src/",
+    allowedPackages: ["@chess-one/live-game-runtime", "fastify", "ws", "node:http", "node:stream"],
+    allowedDependencies: ["@chess-one/live-game-runtime", "fastify", "ws"],
+    ambientGrants: [{ names: EDGE_AMBIENT }],
+    transport: true,
+  },
 ];
 
 /** Database access stays on the server: clients never reach the store or its drivers. */
 const CLIENT_FORBIDDEN_PACKAGES = ["kysely", "pg", "pg-", "@chess-one/live-game-persistence"];
+
+/** Clients talk to the server over the wire protocol only, never through its code. */
+const CLIENT_FORBIDDEN_SERVER_PACKAGES = [
+  "@chess-one/live-game",
+  "@chess-one/live-game-runtime",
+  "@chess-one/edge",
+  "fastify",
+  "@fastify/",
+];
+
+/** HTTP and WebSocket stacks: only the edge may import them. */
+const TRANSPORT_PACKAGES = [
+  "fastify",
+  "@fastify/",
+  "ws",
+  "socket.io",
+  "uWebSockets.js",
+  "@chess-one/edge",
+  "node:http",
+  "node:https",
+  "node:http2",
+  "node:net",
+  "http",
+  "https",
+  "http2",
+  "net",
+];
+
+/**
+ * LIVE-WRITER-ACTIVATION-001: the core creates games and executes commands
+ * and deadlines for whoever calls it. Apart from the persistence adapter,
+ * which only stores its records, server code reaches it through the writer
+ * runtime, whose registry holds and activates a writer for every game that
+ * enters play.
+ */
+const CORE_EXECUTION_PACKAGE = "@chess-one/live-game";
+const CORE_EXECUTION_CALLERS = [
+  "server/live-game/",
+  "server/live-game-persistence/",
+  "server/live-game-runtime/",
+];
 
 const PRODUCTION_ROOTS = ["domain/", "contracts/", "server/", "clients/"];
 
@@ -106,10 +186,14 @@ const AMBIENT_GLOBALS = new Set([
   "setTimeout",
   "setInterval",
   "setImmediate",
+  "clearTimeout",
+  "clearInterval",
+  "clearImmediate",
   "queueMicrotask",
   "crypto",
   "Buffer",
   "console",
+  "WebSocket",
 ]);
 
 /** Code evaluation; `.constructor` reaches the Function constructor from any function. */
@@ -162,11 +246,31 @@ function domainPolicyFor(path: string): DomainPolicy | undefined {
   return DOMAIN_POLICIES.find((policy) => path.startsWith(policy.srcRoot));
 }
 
-function checkDomainCode(file: SourceFile, scan: SourceFacts, violations: Violation[]): void {
+function isGranted(
+  policy: DomainPolicy,
+  path: string,
+  name: string,
+  member: string | undefined,
+): boolean {
+  return (policy.ambientGrants ?? []).some(
+    (grant) =>
+      (grant.file === undefined || grant.file === path) &&
+      (grant.names.includes(name) ||
+        (member !== undefined && grant.names.includes(`${name}.${member}`))),
+  );
+}
+
+function checkDomainCode(
+  file: SourceFile,
+  scan: SourceFacts,
+  policy: DomainPolicy,
+  violations: Violation[],
+): void {
   const add = (rule: string, line: number, detail: string): void => {
     violations.push({ rule, path: file.path, line, detail });
   };
   for (const { name, line, member } of scan.identifiers) {
+    if (isGranted(policy, file.path, name, member)) continue;
     if (AMBIENT_GLOBALS.has(name) || (name === "Math" && isImpureMath(member))) {
       add("ambient_access", line, `${name} is not allowed in domain code`);
     } else if (DYNAMIC_CODE_GLOBALS.has(name)) {
@@ -220,6 +324,9 @@ function checkImports(file: SourceFile, scan: SourceFacts, violations: Violation
       if (isContract && (target.startsWith("server/") || target.startsWith("clients/"))) {
         add("contract_imports_runtime", line, `${specifier} imports server or client code`);
       }
+      if (file.path.startsWith("clients/") && target.startsWith("server/")) {
+        add("client_imports_server", line, `${specifier} reaches server code`);
+      }
       continue;
     }
 
@@ -239,6 +346,35 @@ function checkImports(file: SourceFile, scan: SourceFacts, violations: Violation
     if (file.path.startsWith("clients/") && matchesPackageList(root, CLIENT_FORBIDDEN_PACKAGES)) {
       add("client_imports_persistence", line, `${specifier} is server-side persistence`);
     }
+    if (
+      file.path.startsWith("clients/") &&
+      matchesPackageList(root, CLIENT_FORBIDDEN_SERVER_PACKAGES)
+    ) {
+      add("client_imports_server", line, `${specifier} is server code`);
+    }
+    if (
+      file.path.startsWith("server/") &&
+      root === CORE_EXECUTION_PACKAGE &&
+      !CORE_EXECUTION_CALLERS.some((caller) => file.path.startsWith(caller))
+    ) {
+      add(
+        "writer_bypass",
+        line,
+        `${specifier} executes games directly; use @chess-one/live-game-runtime`,
+      );
+    }
+    if (
+      policy !== undefined &&
+      policy.transport !== true &&
+      (matchesPackageList(root, TRANSPORT_PACKAGES) ||
+        matchesPackageList(specifier, TRANSPORT_PACKAGES))
+    ) {
+      add(
+        "transport_in_core",
+        line,
+        `${specifier} is a transport stack; only server/edge may use it`,
+      );
+    }
     if (policy !== undefined && !policy.allowedPackages.includes(specifier)) {
       add(
         "forbidden_import",
@@ -248,7 +384,7 @@ function checkImports(file: SourceFile, scan: SourceFacts, violations: Violation
     }
   }
 
-  if (policy !== undefined) checkDomainCode(file, scan, violations);
+  if (policy !== undefined) checkDomainCode(file, scan, policy, violations);
 }
 
 function objectKeys(value: unknown): string[] {
@@ -302,6 +438,12 @@ function checkManifest(file: SourceFile, violations: Violation[]): void {
     }
     if (file.path.startsWith("clients/") && matchesPackageList(name, CLIENT_FORBIDDEN_PACKAGES)) {
       add("client_imports_persistence", `${name} is server-side persistence`);
+    }
+    if (
+      file.path.startsWith("clients/") &&
+      matchesPackageList(name, CLIENT_FORBIDDEN_SERVER_PACKAGES)
+    ) {
+      add("client_imports_server", `${name} is server code`);
     }
   }
 

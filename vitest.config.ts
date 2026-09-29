@@ -13,6 +13,14 @@ export default defineConfig({
           exclude: [...configDefaults.exclude, "tests/live-game-persistence/**/*.db.test.ts"],
         },
       },
+      {
+        test: {
+          name: "realtime",
+          include: ["tests/realtime/**/*.test.ts"],
+          exclude: [...configDefaults.exclude, "tests/realtime/**/*.db.test.ts"],
+          testTimeout: 20_000,
+        },
+      },
     ],
   },
 });

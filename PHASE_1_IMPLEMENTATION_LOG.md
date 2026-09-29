@@ -1712,3 +1712,346 @@ Owner-authorized (2026-09-29). Implemented, **uncommitted** together with Batch 
 - The least-privilege runtime role (LIVE-PERSIST-004) is documented, not provisioned. The tests run as the owner of their test database.
 - Mutation checks were not run.
 - No transport, reconnect, lease replacement, abort, or abandonment.
+
+## PHASE 1 / BATCH 9 — REALTIME TRANSPORT FOUNDATION
+
+Owner-authorized (2026-09-29). Implemented, **uncommitted**, awaiting review. `HEAD` stays `b220a0090de8c13cca269ef5f2185e08f055f354` (Batch 8 + 8.1). No remote, no push, no ZIP. Batch 10 is not started. Decisions LIVE-RT-001 to 016 and the open gaps are in `PHASE_0_DECISION_CHANGELOG.md` section 19; the protocol contract is `CONTRACT_CATALOG_V1.md` section 11.
+
+The live path is: client → `server/edge` (Fastify + `ws`) → `GameWriterRegistry` (one writer per game) → `executeCommand`/`executeDeadline` → `processCommand` → PostgreSQL → response. It is not a public production release.
+
+### Technology and dependencies
+
+- **fastify 5.12.5** (MIT; latest stable 5.x; no install script; published advisories are fixed at or below 5.12.1). It hosts HTTP with logging off, `bodyLimit` 1024, and 503 while closing.
+- **ws 8.22.0** (MIT; zero dependencies; engines `node >=10`; no install script; the optional native peers `bufferutil` and `utf-8-validate` are not installed; published DoS advisories are fixed below 8.21.0). It runs with `noServer`, no client tracking, no permessage-deflate, `maxPayload` = the frame limit, and its own UTF-8 check disabled because the edge decodes text itself.
+- **@types/ws 8.18.1** (MIT, types only, dev).
+- **`@fastify/websocket` was rejected:** it pulls a duplexify and readable-stream chain, and upgrades are gated here before the handshake.
+- Exact versions (`saveExact`). The first `pnpm install` was blocked by Auto-review and re-run only after the owner approved it.
+- **Lockfile:** `pnpm-lock.yaml` +411 lines. It adds the edge and test importers and fastify's own dependency tree (about 50 packages, all without `requiresBuild` or an install script).
+- **Audit:** `pnpm audit`: no known vulnerabilities.
+- No Redis, Kafka, NATS, RabbitMQ, Kubernetes, Docker, cloud, or Supabase.
+
+### Packages and layering
+
+- **Layering:** Chess Rules → Live Game Core → Persistence → Runtime → Edge. The core and `processCommand` are unchanged, and nothing below the edge knows about sockets, HTTP, or JSON wire.
+- **`server/live-game-runtime` (`@chess-one/live-game-runtime`)**, which depends on game-values, chess-rules, and live-game only:
+  - `clock.ts`: the `MonotonicClock`, `ClockDomain`, and `WakeScheduler` interfaces.
+  - `system.ts`: `createSystemClockDomain()` (`process.hrtime.bigint()`, id `boot-<uuid>`) and `createSystemWakeScheduler()`. This is the only file granted a clock and timers.
+  - `bounded-queue.ts`: a ring-buffer FIFO.
+  - `writer-runtime.ts`: `GameWriterRuntime`.
+  - `registry.ts`: `GameWriterRegistry`.
+  - `game-view.ts`: the live view.
+  - `facts.ts`: the `FactSink` fact types.
+- **`server/edge` (`@chess-one/edge`)**, which depends on the runtime, fastify, and ws, and imports `node:http`/`node:stream` types only:
+  - `protocol/strict-json.ts`, `protocol/client-messages.ts`, and `protocol/server-messages.ts`: the wire protocol.
+  - `session.ts`, `config.ts`, `token-bucket.ts`, and `facts.ts`.
+  - `connection.ts`: one WebSocket connection.
+  - `edge.ts`: upgrade gating and lifecycle.
+- **Boundary checker (`tooling/boundaries/rules.ts`):**
+  - Runtime and edge policies, and per-file ambient grants: `system.ts` alone gets `process.hrtime`, `crypto.randomUUID`, `setTimeout`, and `clearTimeout`; the edge gets timers and the `WebSocket` type name.
+  - `transport_in_core`: fastify, `@fastify/*`, ws, socket.io, uWebSockets.js, `@chess-one/edge`, and `node:http`/`https`/`http2`/`net` are allowed only in the edge.
+  - `client_imports_server`: clients may not import live-game, the runtime, the edge, or Fastify.
+  - `clearTimeout`, `clearInterval`, `clearImmediate`, and `WebSocket` were added to the ambient list.
+- **Root scripts:** `typecheck` and `check` cover both new packages. The `realtime` Vitest project runs in `test`. `test:realtime` (`vitest.realtime.config.ts`) runs every realtime test, including the PostgreSQL end-to-end tests, which `test:db` also runs.
+
+### Writer, queue, and receipt
+
+- **One writer per game** in the process (LIVE-RT-003, LIVE-WRITER-OWNERSHIP-001 OPEN). The registry is bounded by `maxWriters` (10000); over the limit, `server_busy WRITER_CAPACITY`.
+- **Queue:** a bounded FIFO per writer, holding `maxQueuedRequests` (32) commands and syncs, counting the one in progress, plus one reserved deadline slot. Full → `server_busy WRITER_QUEUE_FULL`, and the command was not received.
+- **Receipt (LIVE-RT-002):** `submitCommand` stamps `received_at = clock.now()` and enqueues in one synchronous step, before any wait. Queue delay is not charged (TST-RT-002: stamps 1100/1200/1300 committed after a hold until 90000 are charged exactly 100/100/100).
+- **One job at a time.** Every job loads from the repository, so the database is the state; the writer keeps only its last published sequence and condition. A reply is sent once; the issuer's reply precedes publication to subscribers.
+- **Lifecycle:**
+  - A writer is created on first acquire, and a game started through `registry.startGame` is activated at once.
+  - A writer with no subscribers and a stopped clock (finished, unresolved, paused, or not found) retires after `idleRetireMs`. A running game keeps its writer with no connection.
+  - `dispose()` finishes the job in progress, answers the queued ones `temporarily_unavailable`, cancels every timer, and acquires nothing more.
+
+### Time and timers
+
+- **Clock (LIVE-RT-004):** `process.hrtime.bigint()`, relative to the domain's origin, floored to whole ms. `clockDomainId` is constant per registry. A new process is a new domain, so its running games load recovery-paused.
+- **Deadline (LIVE-RT-005):**
+  - The writer arms a wake at `anchor + remaining + 1`.
+  - The wake stamps a deadline check with `clock.now()` and enqueues it in the same FIFO. An early wake re-arms (TST-RT-007), and the timer is wake-up only.
+  - A persistence failure retries after `deadlineRetryMs`. No socket is needed (TST-RT-006, TST-RT-023 on real timers, TST-EDGE-026). *Superseded by Batch 9.1: a failed deadline check pauses play; there is no retry and no `deadlineRetryMs`.*
+- **Exact deadline:** `received_at = D` is Accepted with 0 ms left, and `D + 1` is `MoveReceivedAfterDeadline` (TST-RT-005, TST-EDGE-026 over WebSocket).
+- **Timer race: proven by design, not claimed from timing.** Stamp order is processing order.
+  - TST-RT-008: a command stamped at D is queued before a wake that fires later but is stamped at D + 500; the command is Accepted and the wake re-arms for Black.
+  - TST-RT-009: a wake stamped at D + 1 before the command: the flag is committed and the command gets `MatingPossibilityUnresolved`.
+  - TST-RT-010: a command stamped at D + 1 queued before the wake is late by its own stamp, and the wake then finds nothing to do.
+
+### Protocol, validation, and security
+
+- **Protocol `chess_one.realtime.v1` (LIVE-RT-001, catalog section 11):**
+  - Client message types: `hello`, `ping`, `sync_game`, `game_command`.
+  - Server message types: `connection_ready`, `game_snapshot`, `game_update`, `command_response`, `recovery_required`, `sync_required`, `request_failed`, `server_busy`, `protocol_error`, `pong`.
+- **Validation:**
+  - A strict JSON parser with Map objects; duplicate keys, depth over 2, strings over 128, more than 16 keys, arrays, and ill-formed Unicode are rejected while parsing.
+  - Closed field sets per message and per command. Types and lengths are checked; the game id is validated because the edge routes on it. The core still decides every meaning.
+  - Frame limit 4096 (ceiling 16384). Binary frames and invalid UTF-8 are `protocol_error`, and an oversized frame closes with 1009 before parsing.
+  - `protocol_error.field` is a schema name or null.
+- **Upgrade gating (LIVE-RT-013):** path, method, and upgrade header, then subprotocol, origin, capacity, credential size, and the session with a timeout. All of it happens before the handshake, answered with HTTP status plus a JSON code.
+- **Origins:** exact allowlist. `*` is refused, including in hostnames; production origins must be `https:` and test origins loopback. A production edge refuses a test-only resolver, and with no resolver no edge starts (TST-EDGE-CONFIG-001 to 003).
+- **Trusted session (LIVE-RT-012):**
+  - The `TrustedSessionResolver` interface; the only implementation is the test-only `TestTrustedSessionResolver` in `tests/realtime/support`.
+  - Actor, seat, and lease come only from its grants; the transport never grants or replaces a lease.
+  - A forged command (Black sending White's command with White's `actorId`) is rejected by the core, and a game outside the session is `GAME_ACCESS_DENIED` (TST-EDGE-022).
+- **Facts:** codes and ids only, never tokens, credentials, or leases (TST-EDGE-051).
+
+### Sync, updates, reconnect, and recovery
+
+- **Sync:** `game_snapshot.v1` carries gameId, rulesetId, sequence, FEN, side to move, seat, status, playable, recoveryRequired, clock balances, and pending offer. It has no anchors, bindings, fingerprints, leases, player ids, clock domain, or database internals (TST-PROTO-020, TST-EDGE-020).
+- **Order (LIVE-RT-015):** `command_response` to the issuer, then `game_update` to every subscriber, including the issuer's other connections (TST-EDGE-021, 027). The per-connection sequence guard means no regression (TST-EDGE-025: a two-player burst yields 0, 1, 2, 3 on both sides).
+- **Reconnect:** a disconnect changes nothing. Reconnect, `hello`, and `sync_game` return the stored sequence and live balances, and a resent command replays with no second transition (TST-EDGE-023, 024, TST-RT-DB-001).
+- **Recovery (LIVE-RT-011):** the snapshot is marked, `recovery_required` is sent, play is refused, stored bindings replay, no timer runs, and nothing auto-resumes (TST-RT-014, TST-EDGE-033, TST-RT-DB-003). LIVE-RECOVERY-RESUME-001 OPEN.
+
+### Flow control and failures
+
+- **Outbound (LIVE-RT-007):** over 256 KiB of unsent backlog, the connection is closed with 1008 `slow_consumer`. TST-EDGE-040 pauses a real client until the server's socket backs up: the connection closes with 1008, the game and the opponent are unaffected, and reconnect + sync works.
+- **Inbound (LIVE-RT-008):** a token bucket (burst 20, 10/s) runs before parsing. The first over-limit message gets one `RATE_LIMITED`, and 50 consecutive ones close with 1008. In TST-EDGE-041, 40 commands give 4 received, 1 notice, and close 1008; the other player is unaffected.
+- **Heartbeat:** a ws ping every 15 s; no pong by the next ping means the connection is terminated (TST-EDGE-042).
+- **Handshake timeout:** 5 s to send `hello`, else 1008 (TST-EDGE-012).
+- **Cleanup:** every close removes the socket listeners, the subscriptions, and the timers. Ten connect/sync/close cycles leave 0 connections and 0 subscribers (TST-EDGE-050). Shutdown closes all connections with 1000 (TST-EDGE-052).
+- **Persistence failure (LIVE-RT-009):** `TEMPORARILY_UNAVAILABLE`, retryable, with no update and no SQLSTATE; the same id then succeeds. Covered with injected faults (TST-RT-011, 012, TST-EDGE-031) and with a real PostgreSQL error raised by a trigger inside the commit transaction (TST-RT-DB-002). *Superseded by Batch 9.1: a persistence failure pauses play (`recovery_required PERSISTENCE_UNAVAILABLE`); the same id is refused until a future resume.*
+- **Concurrency conflict (LIVE-RT-010):** the writer stops, with no overwrite and no retry. Waiting requests get `TEMPORARILY_UNAVAILABLE`, subscribers get `sync_required`, and a fresh writer reloads (TST-RT-013, TST-EDGE-032).
+- **Close codes:** 1000, 1002, 1008, 1009 only (LIVE-RT-014).
+
+### Tests
+
+- **Runtime:** `tests/realtime/writer-runtime.test.ts`, TST-RT-001 to 023, on a manual clock and scheduler over the contract repository (plus one test on real timers).
+- **Edge:** `tests/realtime/edge.test.ts`, TST-EDGE-001 to 052, 34 tests over a real Fastify + ws endpoint on 127.0.0.1 with real `ws` clients.
+  - **Parsing security** (TST-EDGE-014): 33 hostile or malformed texts plus binary and invalid UTF-8 frames. The runtime is never reached: 0 loads, 0 writers, and `Object.prototype` untouched.
+- **Protocol:** `tests/realtime/protocol.test.ts`, TST-PROTO-001 to 031 (9 tests): strict JSON, decoding of every message and command, the largest-message size, snapshot and response encoding, the token bucket, and the bounded queue.
+- **Config:** `tests/realtime/edge-config.test.ts`, TST-EDGE-CONFIG-001 to 003: fail-closed configuration.
+- **PostgreSQL end to end:** `tests/realtime/realtime.db.test.ts`, TST-RT-DB-001 to 003, using real ws + Fastify + PostgreSQL 18.6 in a disposable schema; the guards are in `tests/live-game-persistence/support/disposable-schema.ts`, and a missing database is BLOCKED, never skipped.
+  - **DB-001:** the 13 mandated steps, from creation through a replay that makes no second transition.
+  - **DB-002:** a real in-transaction PostgreSQL failure, then a retry.
+  - **DB-003:** restart. The registry is disposed, a new clock domain loads the game recovery-paused and sends `recovery_required`, play is refused, and the old binding replays with the rows unchanged.
+- **Boundaries:**
+  - TST-BOUNDARY-029: no transport below the edge.
+  - TST-BOUNDARY-030: the runtime's imports, and grants in `system.ts` only.
+  - TST-BOUNDARY-031: the edge allowlist, with no clock, environment, or randomness.
+  - TST-BOUNDARY-032: clients never import server packages.
+  - TST-BOUNDARY-033: realtime scripts, with no skip or only.
+  - TST-BOUNDARY-024 now covers both new packages.
+- **Defects found by the new tests and fixed before the gates:**
+  - The runtime skipped re-arming the deadline while a deadline check was itself running. The "queued" flag is now cleared when the check starts, and TST-RT-007/008 catch it.
+  - The edge let `ws` close invalid UTF-8 with 1007. The edge now validates text itself.
+  - A wildcard hostname origin (`https://*.example`) parsed as a valid URL. `*` is now refused outright.
+
+### Gates (Node 24.21.0, pnpm 12.7.0, TypeScript 7.0.2, PostgreSQL 18.6)
+
+- typecheck, lint, format:check, check:boundaries, test, test:rules, check, audit, test:db, and test:realtime all pass (exit 0).
+- **Normal suite:** 47 files, 559 passed, 0 failed, 0 skipped, 0 todo. By project: rules 291, boundaries 33, live-game 117, persistence 49, realtime 69.
+- **`test:realtime`:** 5 files, 72 passed, 0 skipped, 0 blocked.
+- **`test:db`:** 2 files, 15 passed (12 persistence + 3 realtime), 0 skipped, 0 blocked, in database `chess_one_test`.
+- **Audit:** no known vulnerabilities.
+- No cast, `ts-ignore`, `ts-expect-error`, `biome-ignore`, `any`, silent catch, floating promise, or unbounded queue was added. `check-boundaries` scans 156 files and passes.
+
+### Remaining gaps
+
+- **LIVE-WRITER-OWNERSHIP-001 (OPEN):** single-writer ownership holds in one process only.
+- **LIVE-MULTI-CONNECTION-001 (OPEN):** connections share the writer and the lease; there is no device control or takeover.
+- **LIVE-RECOVERY-RESUME-001 (OPEN):** a paused game stays paused.
+- **LIVE-RETRY-RECEIPT-001 (OPEN, new):** a retry after a database outage is charged from the retry's receipt. This needs an owner decision. *RESOLVED in Batch 9.1.*
+- **LIVE-WRITER-ACTIVATION-001 (OPEN, new):** a game not started through the registry, or after a writer stop, is watched only from its next request. *RESOLVED in Batch 9.1.*
+- **LIVE-VIEW-ONLY-001 (OPEN, new):** no spectators.
+- **Missing pieces:**
+  - no production `TrustedSessionResolver`, accounts, or authentication (a production edge refuses to start);
+  - no outbox dispatcher (`game.finished` stays durable in the outbox only);
+  - no metrics exporter;
+  - no lease replacement or abandonment;
+  - no deployment.
+- Mutation checks were not run.
+
+## PHASE 1 / BATCH 9.1 — INFRASTRUCTURE PAUSE + WRITER ACTIVATION HARDENING
+
+Owner-authorized (2026-09-29). Implemented, **uncommitted** together with Batch 9, awaiting review. `HEAD` stays `b220a0090de8c13cca269ef5f2185e08f055f354`. No remote, no push, no ZIP. Batch 10 is not started. No dependency, package, or lockfile change. Legality, SAN, repetition, draw rules, mating capability, resignation, and draw offers are unchanged. Decisions LIVE-RT-009 (replaced), 017, and 018 are in `PHASE_0_DECISION_CHANGELOG.md` section 19.
+
+### Policy (LIVE-RETRY-RECEIPT-001, RESOLVED)
+
+"Database/persistence outage pauses the game at the last durably committed balances. Infrastructure downtime is never charged to a player."
+
+- **A failed commit is not executed.** The writer adopts nothing, and no sequence, binding, outbox row, `game_update`, or `Accepted` is produced.
+- **Pause, not finish.** The game enters the runtime condition `infrastructure_paused`, reason `PERSISTENCE_UNAVAILABLE`. It has no `GameResult`, is not `MATING_POSSIBILITY_UNRESOLVED`, and is not the clock-domain pause.
+- **Balances:** the stored balances of the last durable state, as the record already holds them. There is no wall-clock or cross-epoch arithmetic: the time since the last commit, the outage, and any retry are never measured and never charged. This can credit the player to move with the time since the last commit, which the owner accepted ("correctness and fairness over exact infrastructure-downtime accounting").
+- **While paused:**
+  - A command is refused at ingress (`infrastructure_paused`) before it is stamped. It is not received, reaches no queue, touches no repository, and binds no id.
+  - Commands already queued behind the failing job are answered `recovery_required` and never executed.
+  - No deadline check runs: the timer is disarmed, a queued check is dropped, and there is no retry (`deadlineRetryMs` is removed).
+  - A sync still reads and serves the paused view: `running: false` and the stored balances.
+  - Subscribers are told once, via `onRecoveryRequired`, so the edge sends `recovery_required` (reason `PERSISTENCE_UNAVAILABLE`, `requestId: null`) to every connection. The issuer also gets its own reply with its `clientCommandId`. No SQL, SQLSTATE, or driver text reaches the wire.
+- **Same command id:** it stays unbound. A client may send it again after a future resume. There is no automatic transport retry.
+- **No automatic resume.** The pause is held by the registry, so it outlives the writer (idle retirement, stop) and binds every later writer of the game in this process. The database answering again resumes nothing; LIVE-RECOVERY-RESUME-001 stays OPEN. A new process is a new clock domain, where the stored anchor already pauses the game.
+- **Distinct reasons:** `RecoveryReason` = `RECOVERY_PAUSED_CLOCK_DOMAIN_CHANGED` (durable, the clock domain changed) | `PERSISTENCE_UNAVAILABLE` | `WRITER_FAULT`.
+  - `WRITER_FAULT` covers a defect that stops the writer: the same fairness rule applies, so the running game pauses instead of losing its watcher.
+  - A persistence failure on a game already known to be stopped (finished, unresolved, or clock-domain paused) has no clock to protect and is answered `TEMPORARILY_UNAVAILABLE` only.
+- **Ambiguous commit** (the write landed, but a failure was reported): the command is still answered `recovery_required`. The landed transition is the durable state, so a sync serves it paused (published once), and its binding replays after a resume.
+
+### Activation contract (LIVE-WRITER-ACTIVATION-001, RESOLVED)
+
+- **`GameWriterRegistry.activate(gameId)`** holds the game's writer and loads the game now, with no WebSocket, subscriber, or command. It returns an `Activation`:
+  - `watching`: running, with its deadline armed;
+  - `stopped`: finished or unresolved, with no timer;
+  - `recovery_required`: paused, with no competitive timer;
+  - `unavailable`: the writer could not load the game or take the request.
+- **Idempotent:** one writer per game, and `DeadlineWatch` keeps its single timer when the same instant is armed again.
+- **`startGame`:**
+  - It holds the writer **before** the game is stored. With no writer available it returns `writer_refused` and creates nothing.
+  - It activates before returning, and returns `{ state, activation }`.
+  - A create reported failed is still followed by activation. If that write landed, the game is running and nobody was told about it, so it is paused, never charged.
+- **Invariant:** in this process a running game is always watched by its writer, or paused.
+  - Running writers are never retired.
+  - A conflict stop re-activates a fresh writer at once (`writer_reactivated`).
+  - A defect stop pauses the game (`WRITER_FAULT`).
+- **Boundary rule `writer_bypass`:** no server package except the core, the persistence adapter, and the runtime may import `@chess-one/live-game`. A future matchmaking or admin package can start or re-enter a game only through the registry (TST-BOUNDARY-034). No matchmaking was built.
+
+### Structure (`server/live-game-runtime/src`)
+
+- `writer-runtime.ts` (571 lines): the job loop only (ingress, queue, load, execute, adopt, publish, pause entry, retirement).
+- `writer-port.ts` (125): what a transport sees (ingress, outcomes, `Activation`, subscriber, port).
+- `writer-recovery.ts` (90): `RecoveryReason`, `InfrastructurePaused`, the effective condition, and the registry-owned `InfrastructurePauses` ledger.
+- `deadline-watch.ts` (49): the single deadline wake-up.
+- `registry.ts` (217): adds activation, the ledger, capacity-first start, and conflict re-activation.
+- Subscriber fan-out is one helper. Nothing was split for line count alone.
+
+### Edge
+
+- `recovery_required.reason` is the `RecoveryReason` union. The message gained `clientCommandId` (the refused command's id, or null).
+- `game_snapshot.v1` gained `recoveryReason`; `recoveryRequired` is true for every recovery reason, and `playable` is true only while running.
+- An ingress refusal `infrastructure_paused` maps to `recovery_required` with the pause's own reason.
+
+### Tests
+
+- **`tests/realtime/infrastructure-pause.test.ts`, TST-RT-PAUSE-001 to 008:**
+  - **PAUSE-001 (§9):** the player waits 250 ms and plays a legal move, and the commit fails. Position, sequence, clock, bindings, and outbox are unchanged, with no `Accepted` and no update. The clock stops, and a minute past the original deadline the view still shows the committed balances, with no flag. New commands and the same id are refused. The same id is then decided fresh (`Accepted`, not a replay) by the core over a copy of the stored rows, the state a future resume starts from.
+  - **PAUSE-002 (§10):** five commands during the pause cause no queue, load, binding, retry, or timer. The database returning resumes nothing.
+  - **PAUSE-003:** commands queued behind the failing commit are answered `recovery_required` and never executed.
+  - **PAUSE-004:** a deadline check that cannot load pauses play: no flag, no retry, and the committed balance is kept.
+  - **PAUSE-005:** a sync whose load fails pauses play; a finished game is only unavailable.
+  - **PAUSE-006:** the pause outlives idle retirement.
+  - **PAUSE-007:** a writer defect pauses the game as `WRITER_FAULT`.
+  - **PAUSE-008:** the clock-domain pause and the infrastructure pause stay distinct.
+- **`tests/realtime/writer-activation.test.ts`, TST-RT-ACT-001 to 008:**
+  - **ACT-001:** activation with no socket, subscriber, or command flags at the deadline; UNKNOWN capability becomes unresolved.
+  - **ACT-002:** `startGame` watches before it returns; a flag with proven capability is a win on time.
+  - **ACT-003:** idempotent: one writer and one timer, however often and however concurrently.
+  - **ACT-004:** a finished game gets no timer.
+  - **ACT-005:** a game paused for its clock domain, a persistence-paused game, and an outage during activation all get no timer.
+  - **ACT-006:** the writer is held before storing.
+  - **ACT-007:** a failed create is paused if it landed; if not, no writer remains.
+  - **ACT-008:** a disposed registry activates nothing.
+- **Changed to the approved policy:**
+  - TST-RT-011: a failed commit now pauses play.
+  - TST-RT-012: an ambiguous commit is served paused and its binding replays later.
+  - TST-RT-013: a conflict re-activates a fresh watching writer.
+  - TST-EDGE-031: `recovery_required` goes to the mover and to every subscriber.
+  - TST-RT-DB-002: rewritten below.
+- **Extended for the new fields:** TST-RT-014, 019, 021, TST-EDGE-020, 033, TST-PROTO-020, TST-RT-DB-003.
+- **PostgreSQL:**
+  - **TST-RT-DB-002 (§9):** a real in-transaction PostgreSQL error raised by a trigger on a running game after 450 ms. Rows, position, clock, bindings, and outbox are unchanged. There is no `Accepted` and no `game_update`, and both players get `recovery_required`. After the database recovers and 10 minutes pass, the same id and a resignation are still refused, and the snapshot shows the committed balances with `running: false`.
+  - **TST-RT-DB-004:** activation with no client at all. On PostgreSQL, an UNKNOWN flag is stored `unresolved` with no outbox row, and a proven-capability flag is stored `finished` with one `game.finished` outbox row.
+- Every Batch 9 test is kept green: exact deadline, timer races, slow consumer, inbound flood, reconnect, replay, clock-domain pause, real WS + PG, invalid UTF-8, and wildcard origin.
+
+### Gates (Node 24.21.0, pnpm 12.7.0, TypeScript 7.0.2, PostgreSQL 18.6, database `chess_one_test`)
+
+- typecheck, lint, format:check, check:boundaries (161 files), test, test:rules, check, audit, test:db, and test:realtime all pass (exit 0).
+- **Normal suite:** 49 files, 576 passed, 0 failed, 0 skipped, 0 todo. By project: rules 291, boundaries 34, live-game 117, persistence 49, realtime 85.
+- **`test:realtime`:** 7 files, 89 passed. **`test:db`:** 2 files, 16 passed (12 persistence + 4 realtime). Both have 0 skipped and 0 blocked.
+- **Audit:** no known vulnerabilities.
+- No cast, `ts-ignore`, `ts-expect-error`, `biome-ignore`, or `any` was added.
+
+### Remaining realtime gaps
+
+- LIVE-RECOVERY-RESUME-001 (OPEN): no resume for either pause.
+- LIVE-WRITER-OWNERSHIP-001 (OPEN): in-process only.
+- LIVE-MULTI-CONNECTION-001 (OPEN).
+- LIVE-VIEW-ONLY-001 (OPEN).
+- The infrastructure pause is process memory, not durable. A crash during the pause is covered by the clock-domain pause on restart.
+- No production session resolver.
+- No outbox dispatcher.
+
+## Batch 9.2: writer ownership correction and unconfirmed database outcomes
+
+Owner review of Batch 9.1. `WRITER_FAULT` and the `writer_bypass` rule are approved. The automatic re-activation after a concurrency conflict is rejected and removed. An ambiguous create must be reconciled, never assumed. HEAD stays `b220a00`; nothing is committed. No rule, protocol message, persistence schema, rate limit, backpressure, deadline, timer-ordering, reconnect, replay, origin, or parser behaviour changed. The only wire change is two new `RecoveryReason` values.
+
+### Concurrency conflict (LIVE-RT-010, replaced)
+
+- **What counts as a conflict:**
+  - the repository refuses a commit because the stored sequence moved (a real PostgreSQL sequence conflict);
+  - the writer refuses a commit before it reaches the database because the job read a sequence this writer never published. The runtime gives the core a repository handle that records each load's sequence and passes a commit on only if `expectedSequence` is the last published sequence;
+  - a decision that commits nothing was made on such a foreign sequence;
+  - a sync, in play, loads any sequence other than the last one published (while paused, one behind it).
+  Between its own jobs the stored sequence always equals the last published one: a bound rejection and a replay keep it, and a failed commit pauses play.
+- **What happens:**
+  - there is no overwrite, no retry, and no charge;
+  - the game is paused in the registry ledger with the new reason `CONCURRENCY_OWNERSHIP_UNCERTAIN` (not `PERSISTENCE_UNAVAILABLE`), which overrides every durable condition, so nothing at all is written for it;
+  - the deadline is disarmed;
+  - subscribers get `recovery_required` and then `sync_required`;
+  - the issuer and every queued command get `recovery_required`, and a queued sync gets `temporarily_unavailable`;
+  - the writer stops and leaves the registry.
+- **No automatic reactivation.** `#reactivate` and the fact `writer_reactivated` are removed. A later client sync may hold a writer; that writer serves PostgreSQL's state read-only (paused, `running: false`, stored balances), refuses commands at ingress, and arms no timer. Re-entering play needs an approved ownership/recovery mechanism (LIVE-WRITER-OWNERSHIP-001, LIVE-RECOVERY-RESUME-001, both OPEN).
+- **Fact:** `concurrency_conflict {gameId, detectedBy: "commit" | "load"}`.
+
+### `WRITER_FAULT` (LIVE-RT-017, approved)
+
+- Only an exception escaping a writer job enters it. Domain rejections, persistence failures, conflicts, the clock-domain pause, and protocol errors keep their own paths (TST-RT-OWN-005).
+- The fact is now `writer_fault {gameId, job}`, where `job` is the job kind only. The exception goes to `reportDefect` alone.
+- A command in progress is answered `recovery_required WRITER_FAULT`, which replaces the 9.1 answer `temporarily_unavailable`.
+- A throwing subscriber is reported as `subscriber_defect` and does not pause the game.
+
+### Ambiguous create reconciliation (LIVE-RT-019)
+
+`startGame` returns `StartGameError` = `NewGameError | game_already_exists | CreateUnconfirmed | WriterRefused`. On a create `persistence_failure`, the registry reads the game directly from the repository, outside the writer queue and on a fresh pooled connection. The writer was never activated, so no deadline was armed meanwhile. The outcome is `create_unconfirmed` with one of three reconciliation values:
+
+- `stored`: the writer is kept and paused `PERSISTENCE_UNAVAILABLE`, and the activation is `recovery_required`. No clock runs and no command is played.
+- `not_stored`: the writer reservation is disposed before `startGame` returns, leaving no writer, timer, or pause.
+- `unknown`: only a `CREATE_RECONCILIATION_REQUIRED` ledger entry is kept, and no writer is held. `startGame` of that id is refused `writer_refused game_paused`. A later sync serves the stored game paused, or `game_not_found`.
+
+Also:
+
+- An invalid new game releases its reservation.
+- A game id this process paused is refused before any create.
+- Fact: `create_reconciled {outcome}`.
+
+### Files
+
+- `server/live-game-runtime/src/writer-runtime.ts` (641 lines): the ownership-checked repository handle, `#ownershipConflict`, foreign-sequence checks, `writer_fault`, and paused-aware release.
+- `registry.ts` (274): typed reconciliation (`CreateUnconfirmed`, `StartGameError`, `game_paused`); re-activation removed.
+- `writer-recovery.ts` (109): the two new reasons; uncertain ownership overrides every condition and replaces any earlier reason.
+- `facts.ts` (59): `concurrency_conflict.detectedBy`, `create_reconciled`, `writer_fault`, and `subscriber_defect`; `writer_reactivated` and `writer_defect` removed.
+- `index.ts`: exports the new types.
+- Tests:
+  - new: `tests/realtime/writer-ownership.test.ts` (TST-RT-OWN-001 to 005) and `create-reconciliation.test.ts` (TST-RT-CREATE-001 to 003);
+  - changed: `writer-runtime.test.ts` (TST-RT-013), `writer-activation.test.ts` (TST-RT-ACT-007), `infrastructure-pause.test.ts` (TST-RT-PAUSE-007), `edge.test.ts` (TST-EDGE-032, new 035), `realtime.db.test.ts` (new TST-RT-DB-005, 006), and `support/repositories.ts` (a one-shot `beforeCommit` hook so another writer can commit between a load and a commit).
+- Docs: changelog section 19, catalog section 11, the traceability matrix, and the v6 status line.
+
+### Tests
+
+- **TST-RT-OWN-001 (§5, all nine points):** two registries over one store.
+  1. Writer A is running and watching.
+  2. Another writer commits between A's load and A's commit, so the store refuses A's commit.
+  3. A stops (`writer_retired concurrency_conflict`).
+  4. No writer is created (`writer_created` stays 1, registry size 0).
+  5. No wake is pending.
+  6. At +900 s a client sync reads the stored balances with `running: false`, and commands are refused.
+  7. No `game_update` is sent.
+  8. Subscribers get `recovery_required CONCURRENCY_OWNERSHIP_UNCERTAIN`, then the stop notice.
+  9. The store holds the other writer's move and binding only.
+- **OWN-002:** a command decided on a foreign sequence is refused before the store.
+- **OWN-003:** a stale deadline wake flags nothing.
+- **OWN-004:** a sync that sees a foreign sequence pauses.
+- **OWN-005:** `WRITER_FAULT` only for exceptions.
+- **TST-RT-CREATE-001 (§9.1):** the insert landed and the acknowledgement failed; the read finds the game, which is paused with full balances at +900 s, no timer, and commands refused.
+- **CREATE-002 (§9.2):** nothing inserted; the reservation is released, nothing is pending, and a retry starts normally.
+- **CREATE-003 (§9.3):** the read also fails: outcome `unknown`, no writer, no timer, `game_paused` on retry. After the database returns, the game is served paused, or `game_not_found`.
+- **TST-EDGE-032:** the conflict on the wire (a real conflict through `beforeCommit`), with no update, no writer, and play refused.
+- **TST-EDGE-035:** `WRITER_FAULT` on the wire, with no error text.
+- **TST-RT-DB-005:** a real PostgreSQL sequence conflict between two registries on one schema.
+- **TST-RT-DB-006:** the three create cases against PostgreSQL. The insert is real in cases 1 and 3; in case 3 the unreadable read is injected at the repository boundary.
+
+### Gates (Node 24.21.0, pnpm 12.7.0, TypeScript 7.0.2, PostgreSQL 18.6, database `chess_one_test`)
+
+- typecheck, lint, format:check (176 files), check:boundaries (163 files), test, test:rules, check, audit, test:db, and test:realtime all pass (exit 0).
+- **Normal suite:** 51 files, 585 passed. By project: rules 291, boundaries 34, live-game 117, persistence 49, realtime 94.
+- **`test:realtime`:** 9 files, 100 passed. **`test:db`:** 2 files, 18 passed.
+- 0 failed, 0 skipped, 0 blocked, 0 todo.
+- **Audit:** no known vulnerabilities.
+- No dependency, cast, `as const`, `ts-ignore`, `ts-expect-error`, or `biome-ignore` was added.

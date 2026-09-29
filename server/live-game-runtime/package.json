@@ -1,0 +1,14 @@
+{
+  "name": "@chess-one/live-game-runtime",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@chess-one/chess-rules": "workspace:*",
+    "@chess-one/game-values": "workspace:*",
+    "@chess-one/live-game": "workspace:*"
+  }
+}

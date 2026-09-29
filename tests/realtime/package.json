@@ -1,0 +1,16 @@
+{
+  "name": "@chess-one/tests-realtime",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "@chess-one/chess-rules": "workspace:*",
+    "@chess-one/edge": "workspace:*",
+    "@chess-one/game-values": "workspace:*",
+    "@chess-one/live-game": "workspace:*",
+    "@chess-one/live-game-persistence": "workspace:*",
+    "@chess-one/live-game-runtime": "workspace:*",
+    "@types/ws": "8.18.1",
+    "ws": "8.22.0"
+  }
+}
