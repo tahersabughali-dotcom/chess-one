@@ -3,6 +3,7 @@ import type { Duplex } from "node:stream";
 import Fastify, { type FastifyInstance } from "fastify";
 import { WebSocketServer } from "ws";
 import { registerAuthRoutes } from "./auth/routes.ts";
+import { registerChallengeRoutes } from "./challenges/routes.ts";
 import { type EdgeConfig, type ResolvedEdgeConfig, resolveEdgeConfig } from "./config.ts";
 import { CLOSE_NORMAL, RealtimeConnection } from "./connection.ts";
 import type { UpgradeRejection } from "./facts.ts";
@@ -171,6 +172,17 @@ export function createRealtimeEdge(input: EdgeConfig): RealtimeEdge {
       facts,
       reportDefect: config.reportDefect,
     });
+    if (config.challenges !== null) {
+      registerChallengeRoutes(app, {
+        challenges: config.challenges,
+        sessions: config.auth.accounts,
+        cookie: config.auth.cookie,
+        allowedOrigins: config.allowedOrigins,
+        maxCookieLength: limits.maxCredentialLength,
+        facts,
+        reportDefect: config.reportDefect,
+      });
+    }
   }
 
   const refuse = (socket: Duplex, rejection: Rejection): void => {

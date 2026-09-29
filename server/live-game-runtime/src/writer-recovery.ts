@@ -53,6 +53,8 @@ export function recoveryReasonOf(condition: WriterCondition): RecoveryReason | n
       return condition.reason;
     case "infrastructure_paused":
       return condition.reason;
+    case "awaiting_players":
+    case "aborted_before_start":
     case "running":
     case "finished":
     case "rules_unresolved":
@@ -61,19 +63,20 @@ export function recoveryReasonOf(condition: WriterCondition): RecoveryReason | n
 }
 
 /**
- * An infrastructure pause overrides a running game: a finished or unresolved
- * game has no clock to protect, and a clock-domain pause already stops the
- * clock. Uncertain ownership overrides every condition, so no command of any
- * kind is written while another writer may own the game.
+ * An infrastructure pause overrides a running game and a game awaiting its
+ * players (whose start would begin a clock this process no longer trusts
+ * itself to write): a finished, unresolved, or aborted game has no clock to
+ * protect, and a clock-domain pause already stops the clock. Uncertain
+ * ownership overrides every condition, so no command of any kind is written
+ * while another writer may own the game.
  */
 export function effectiveCondition(
   durable: GameCondition,
   paused: InfrastructureReason | undefined,
 ): WriterCondition {
   if (paused === undefined) return durable;
-  return durable.kind === "running" || paused === OWNERSHIP_UNCERTAIN
-    ? infrastructurePaused(paused)
-    : durable;
+  const inPlay = durable.kind === "running" || durable.kind === "awaiting_players";
+  return inPlay || paused === OWNERSHIP_UNCERTAIN ? infrastructurePaused(paused) : durable;
 }
 
 /**

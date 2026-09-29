@@ -267,6 +267,10 @@ export function processCommand(
     fingerprint,
   };
 
+  if (state.status.kind === "awaiting_players") return reject(attempt, "GameNotStarted");
+  if (state.status.kind === "aborted_before_start") {
+    return reject(attempt, "GameAbortedBeforeStart");
+  }
   if (state.status.kind === "finished") return reject(attempt, "GameAlreadyFinished");
   if (state.status.kind === "unresolved") {
     return reject(

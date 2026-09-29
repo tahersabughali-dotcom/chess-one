@@ -9,7 +9,7 @@
     "pnpm": "12.7.0"
   },
   "scripts": {
-    "typecheck": "tsc -p domain/game-values && tsc -p domain/chess-rules && tsc -p domain/identity && tsc -p server/live-game && tsc -p server/live-game-persistence && tsc -p server/live-game-runtime && tsc -p server/accounts && tsc -p server/accounts-persistence && tsc -p server/game-access && tsc -p server/game-access-persistence && tsc -p server/edge && tsc -p tests && tsc -p tooling",
+    "typecheck": "tsc -p domain/game-values && tsc -p domain/chess-rules && tsc -p domain/identity && tsc -p domain/challenges && tsc -p server/live-game && tsc -p server/live-game-persistence && tsc -p server/live-game-runtime && tsc -p server/accounts && tsc -p server/accounts-persistence && tsc -p server/game-access && tsc -p server/game-access-persistence && tsc -p server/challenges && tsc -p server/challenges-persistence && tsc -p server/edge && tsc -p tests && tsc -p tooling",
     "lint": "biome check --formatter-enabled=false .",
     "format:check": "biome format .",
     "test": "vitest run",
@@ -18,8 +18,9 @@
     "test:realtime": "vitest run --config vitest.realtime.config.ts",
     "test:auth": "vitest run --config vitest.auth.config.ts",
     "test:game-access": "vitest run --config vitest.game-access.config.ts",
+    "test:challenges": "vitest run --config vitest.challenges.config.ts",
     "check:boundaries": "node tooling/check-boundaries.ts",
-    "check": "tsc -p domain/game-values && tsc -p domain/chess-rules && tsc -p domain/identity && tsc -p server/live-game && tsc -p server/live-game-persistence && tsc -p server/live-game-runtime && tsc -p server/accounts && tsc -p server/accounts-persistence && tsc -p server/game-access && tsc -p server/game-access-persistence && tsc -p server/edge && tsc -p tests && tsc -p tooling && biome check --formatter-enabled=false . && biome format . && node tooling/check-boundaries.ts && vitest run"
+    "check": "tsc -p domain/game-values && tsc -p domain/chess-rules && tsc -p domain/identity && tsc -p domain/challenges && tsc -p server/live-game && tsc -p server/live-game-persistence && tsc -p server/live-game-runtime && tsc -p server/accounts && tsc -p server/accounts-persistence && tsc -p server/game-access && tsc -p server/game-access-persistence && tsc -p server/challenges && tsc -p server/challenges-persistence && tsc -p server/edge && tsc -p tests && tsc -p tooling && biome check --formatter-enabled=false . && biome format . && node tooling/check-boundaries.ts && vitest run"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.14",

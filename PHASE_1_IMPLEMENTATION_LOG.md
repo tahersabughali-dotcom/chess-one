@@ -2403,3 +2403,142 @@ A session without control replayed through the writer's read-only `replayCommand
 ### Status
 
 GACC-017 RESOLVED (pending review). GACC-016 and GAME-CONTROL-REPLAY-RECONNECT-001 stay RESOLVED. LIVE-CONTRACT-005 is not amended again. LIVE-RECOVERY-PAUSED-REPLAY-001 stays OPEN.
+
+## PHASE 1 / BATCH 12 — REGISTERED USER DIRECT CHALLENGES + TRUSTED GAME CREATION
+
+**BATCH 12 BLOCKED ON GAME START LIFECYCLE DECISION.**
+
+Owner-authorized (2026-09-29). Local only, uncommitted, on branch `staging` at HEAD `d111dc1`. No commit, push, merge, deployment, ZIP, or change to the remote, GitHub, Vercel, DNS, `chess-one.com`, or any credential. Changelog section 26 (CHAL-001 to CHAL-015); catalog section 14.
+
+### Blocking finding
+
+Accepting a challenge must create the game through the trusted `createAssignedGame` (GACC-003). A created game's clock runs from creation: `startClock` in `server/live-game/src/clock.ts` returns `running: true` anchored at the start moment, and `startGame` (`server/live-game/src/persistence/writer.ts`, called by `GameWriterRegistry.startGame`, which `createAssignedGame` uses) stores the running game and activates its writer at once. White would lose time before either player connects or claims control. As instructed, the accept-to-game integration was stopped, and no automatic pause was invented. GAME-START-LIFECYCLE-001 records the decision the owner must make. Everything independent of it was built and tested.
+
+### Built
+
+- **`domain/challenges`** (new, `@chess-one/challenge-domain`, pure): `ChallengeId` (22 base64url), status, time control (`sudden_death`, 60 s to 3 h in whole seconds, increment 0), seat preference and `resolveSeats`, the ruleset allowlist (from the chess-rules registry), `CHALLENGE_POLICY` (24 h, 20 outgoing, 100 incoming, pages 20/50), `newChallenge`, `challengeInvariantViolation` (the same rules as the database `CHECK`s), `effectiveChallenge` and `expiryOf`, keyset page cursors, and `decide` (non-participant, then terminal idempotency, then expiry, then role, then the transition).
+- **`server/challenges`** (new, `@chess-one/challenges`): `Challenges` (`ChallengeApi`: `create`, `get`, `list`, `decline`, `cancel`; maintenance `expireOverdue`), the `ChallengeStore` port, views with usernames only, facts, config (eligibility policy open by default; rate limit 10 at once, then one per 30 s per user), and `system.ts` (ids and the random seat draw from `node:crypto`). It reaches accounts only through the new `PlayerDirectory` (`findPlayerByUsername`, `findPlayerById`), implemented by `Accounts`.
+- **`server/challenges-persistence`** (new): migration `001_challenges` (table, `CHECK`s, `ON DELETE RESTRICT` foreign keys, partial indexes for the pending pair, the created game, incoming and outgoing lists, and expiry; the update guard trigger), its own migration bookkeeping, and `PostgresChallengeStore` (advisory-locked create transaction, compare-and-set resolution and expiry, `SKIP LOCKED` sweep through a materialized CTE; times converted in SQL only; malformed rows are `corrupt`, driver errors `unavailable` with SQLSTATE only).
+- **Edge:** `/challenges` routes (`server/edge/src/challenges/routes.ts`, `wire.ts`) behind a `guardScope` now shared with `/auth` (`server/edge/src/http/guarded-scope.ts`; the `/auth` routes were refactored onto it with no behaviour change). `EdgeConfig.challenges` requires `auth`. No accept route.
+- **Tooling:** boundary policies for the three packages (the domain sees identity and chess-rules; the application sees accounts, identity, its domain, and `node:crypto`; the adapter sees its domain, the application, identity, Kysely, and pg); the edge may import `@chess-one/challenges`; clients may import neither the application nor its store. Scripts: `typecheck` and `check` cover the new packages; new `test:challenges` (`vitest.challenges.config.ts`); `test:db` includes `tests/challenges/**/*.db.test.ts`.
+
+### NOT CREATED (blocked on GAME-START-LIFECYCLE-001)
+
+The accept use case and `POST /challenges/:id/accept`; the accept reservation and its reconciliation; the call into `createAssignedGame` and the seat draw at acceptance; the facts `challenge_accepted`, `challenge_accept_conflict`, and `challenge_game_creation_unconfirmed`; accept races (accept against decline, cancel, expiry, and a second accept); the accept-to-live-game end-to-end test (both players connect, claim, and move); and the five-concurrent-accepts end-to-end test. These tests do not exist; none is skipped or marked todo.
+
+### Tests
+
+- **`tests/challenges/domain.test.ts`** (TST-CHAL-DOM-001 to 017): ids, time-control bounds, seat resolution, the expiry boundary, invariants, cursors, and every `decide` branch including accept idempotency in the domain.
+- **`challenges.test.ts`** (TST-CHAL-APP-001 to 023): the application over an in-memory store with PostgreSQL semantics: create order and every refusal, caps, rate limit, IDOR, roles, idempotency, lazy expiry, lost compare-and-set, store failures, pages without repeats or gaps, and facts without personal data.
+- **`http.test.ts`** (TST-CHAL-HTTP-001 to 011): real HTTP login; cookie, origin, media type, cross-site, body limits and shapes, status codes, no accept route, and no user id or email on the wire.
+- **`challenges.db.test.ts`** (TST-CHAL-DB-001 to 016, PostgreSQL): migrations up, down, up; every `CHECK` and foreign key by SQLSTATE (including resolved rows without a resolution time, and 23001 on user deletion with nothing cascaded); the trigger; concurrent same-pair creates across two processes; the outgoing cap under concurrency; decline against cancel across processes; decline against the sweep; the exact expiry boundary; the sweep limit; rollback; corrupt rows fail closed.
+- **`e2e.db.test.ts`** (TST-CHAL-E2E-001 and 002, PostgreSQL, real edge and HTTP registration): register three users; A challenges B by username; B lists and reads; C is refused as if the challenge did not exist; B declines; A challenges again and cancels; B's late decline is refused; an expired challenge is refused and disappears from the list; a restarted server reads every state. Five concurrent declines and cancels across two server processes end with one winning action and a stable result.
+- **Boundaries:** TST-BOUNDARY-046 to 050 (the challenge layers) and 051 (the `test:challenges` wiring; no challenge suite can skip); TST-BOUNDARY-024 lists the new packages.
+
+### Dependencies
+
+No new third-party dependency. New workspace packages `@chess-one/challenge-domain`, `@chess-one/challenges`, `@chess-one/challenges-persistence`, `@chess-one/tests-challenges`; the edge depends on `@chess-one/challenges`. `pnpm-lock.yaml` changed in importers only.
+
+### Gates (Node 24.21.0, pnpm 12.7.0, TypeScript 7.0.2, PostgreSQL 18, database `chess_one_test`)
+
+- All 13 gates pass (exit 0), run one at a time: typecheck, lint, format:check, check:boundaries (289 files), test, test:rules, check, audit, test:db, test:realtime, test:auth, test:game-access, and test:challenges.
+- Test counts:
+  - Normal suite: 64 files, 826 passed (challenges 51, boundaries 52; other projects unchanged).
+  - `test:challenges`: 5 files, 69 passed.
+  - `test:db`: 8 files, 70 passed.
+  - `test:realtime`: 9 files, 101 passed.
+  - `test:auth`: 8 files, 121 passed.
+  - `test:game-access`: 6 files, 84 passed.
+  - `test:rules`: 24 files, 291 passed.
+- 0 failed, 0 skipped, 0 blocked, 0 todo. Audit: no known vulnerabilities.
+- No `any`, cast, `as const`, `ts-ignore`, `ts-expect-error`, `biome-ignore`, silent catch, unbounded map, or secret was added.
+
+### Status
+
+Direct challenges without acceptance: implemented, pending review. Acceptance and trusted game creation: BLOCKED (GAME-START-LIFECYCLE-001). New open gaps: GAME-START-LIFECYCLE-001, LIVE-TIME-INCREMENT-001, CHALLENGE-RATE-LIMIT-DISTRIBUTED-001, CHALLENGE-DURABLE-EVENTS-001. Still open: GAME-ACCESS-CREATION-API-001, LIVE-WRITER-OWNERSHIP-001, LIVE-RECOVERY-RESUME-001, LIVE-RECOVERY-PAUSED-REPLAY-001, LIVE-VIEW-ONLY-001, AUTH-RATE-LIMIT-DISTRIBUTED-001, AUTH-REVOCATION-BROADCAST-001.
+
+## PHASE 1 / BATCH 12.1 — PRE-GAME LIFECYCLE + BOTH-PLAYERS READY BARRIER + COMPLETE DIRECT CHALLENGE ACCEPTANCE
+
+Owner decision (2026-09-29): accept, then a game `awaiting_players` with no clock running, then both players claim and explicitly declare ready, then the writer atomically starts the game, then White's clock starts, then `in_progress`. Local only, uncommitted, on branch `staging` at HEAD `d111dc1`, together with Batch 12. No commit, push, merge, deployment, or change to the remote, GitHub, Vercel, DNS, `chess-one.com`, or any credential. Changelog section 27 (GSL-001 to GSL-014, CHAL-016 to CHAL-022); catalog section 15. GAME-START-LIFECYCLE-001 RESOLVED.
+
+### Built
+
+- **`server/live-game`:** statuses `awaiting_players` and `aborted_before_start`; `createAwaitingGame`; `lifecycle.ts` (`isStartDeadlinePassed`, `startAwaitingGame`, `abortIfStartDeadlinePassed`); `GameNotStarted` and `GameAbortedBeforeStart` rejections in `processCommand` for every command family; `lifecycleOf`; `WallClockMs`. Persistence: `live_game_state.v2` with a v1 compatibility decoder, `storeAwaitingGame`, `executeLifecycle` and `commitLifecycle` (one compare-and-set, sequence 0 to 1), `gameCondition` for pre-game statuses (never running, in any clock domain), plan checks refusing a transition into awaiting or an abort after the start, and the `AwaitingGameIndex` port.
+- **`server/live-game-persistence`:** migration `004_live_game_lifecycle` (v2 format and pre-game statuses for v2 rows only, `live_games_pre_game_shape`, `live_games_awaiting_deadline_idx`); the update writes `state_format`; `dueAwaitingGames(now, limit)`.
+- **`server/live-game-runtime`:** `GameWriterRegistry.createAwaitingGame` and `expireAwaitingGames(limit)`; the writer's `markReady`, `clearReady`, and `readiness`; the ready barrier (`readiness.ts`); the start and abort as the writer's single linearization point; the start-deadline wake from wall time; the `not_in_play` ingress refusal; `ClockView.initialMs`; the system wall clock (`Date.now` in `system.ts` only).
+- **`server/game-access`:** `createAssignedGame` creates an awaiting game with its start deadline; `ready` (session, account, seat, control, lease applied, then the writer); `checkAssignedGame` and `gameLifecycle` for the challenge creator; the `game_ready_denied` fact.
+- **`server/edge`:** `ready_game`, `game_ready_state` (answers and notices), `game_snapshot.v2`, `GAME_NOT_STARTED` and `GAME_ABORTED_BEFORE_START`, readiness cleared on connection close, `POST /challenges/:challengeId/accept` (`challenge_accept.v1`, 200 or 202), and `challengeGameCreator(access)`.
+- **Challenges:** the domain's `accepting` status, `reserveAcceptance`, `completeAcceptance`, and `decideAcceptance`; the application's `accept` and `reconcileAcceptingChallenge`; the `ChallengeGameCreator` port; `newGameReference` (128-bit CSPRNG); migration `002_challenge_acceptance` (reservation columns, checks, the guard trigger, one acceptance per game id); `PostgresChallengeStore.reserveAcceptance` and `completeAcceptance`; a trigger exception maps to `unavailable` (`temporarily_unavailable`).
+
+### Tests
+
+- **Core** `tests/live-game/lifecycle.test.ts` (TST-LIFE-001 to 007): a created game, the exact deadline boundary, the start, the abort, all five command families before the start (`GameNotStarted`, nothing bound or changed) and after an abort, and conditions in any clock domain.
+- **Runtime** `tests/realtime/lifecycle.test.ts` (TST-RT-LIFE-001 to 015): creation and the start wake; one ready then the start, exactly once; simultaneous marks; commands refused at ingress with no clock reading; lease and presence requirements; a closed connection's mark never counts; control transfer; the deadline boundary (minus 1 ms starts, the deadline aborts); the start wake on time and early; any load aborts an overdue game; `expireAwaitingGames` (bounded, failure recorded, no index); restart before the start (no pause) and after it (recovery pause); the final ready racing a first move (the move is refused, then accepted at sequence 2 after the start); a failed start commit is not a start.
+- **Game access over the real edge** `tests/game-access/ready.test.ts` (TST-GACC-READY-001 to 008): the awaiting snapshot; control required; the start heard by both players; `GAME_NOT_STARTED` for all five command families with nothing bound; disconnect, transfer, and logout clear readiness; a ready at the deadline aborts, and commands are then `GAME_ABORTED_BEFORE_START`; a stranger is refused.
+- **Challenge end to end** `tests/game-access/challenge-e2e.test.ts` (TST-GACC-CHAL-001 to 008; real HTTP, real edge, real game access and writers over the in-memory stores): the 23 steps of spec 46; the player who never arrives (spec 47, the exact deadline through the writer's wake); disconnect (48) and transfer (49) before the start; restart before (50) and after (51) the start over the same stores; start races (52: simultaneous, duplicate, late, and against a session revocation).
+- **Challenges:** TST-CHAL-DOM-008, 008A, 009 to 012 (the acceptance rules); TST-CHAL-HTTP-009 and 012 to 014 (the accept route); TST-CHAL-DB-017 to 022 (spec 55 over PostgreSQL) and 023 to 025 (spec 56 failure injection A, B, C).
+- **Persistence and protocol:** TST-PERSIST-020 to 023 (codec v2 and v1 compatibility), TST-PERSIST-075 (migration 004), TST-PROTO-030 to 032 (snapshot v2 and `ready_game`), TST-BOUNDARY-030 (the runtime wall clock).
+- **Updated for the lifecycle:** every test that assigned a game now starts it through the ready barrier, and its expected sequences move up by one (TST-GACC-EDGE, TST-GACC-E2E-001 to 007, TST-GACC-SVC-006).
+
+### Dependencies
+
+No new third-party dependency.
+
+### Gates (Node 24.21.0, pnpm 12.7.0, PostgreSQL 18, database `chess_one_test`)
+
+- All 13 gates pass (exit 0), run one at a time: typecheck, lint, format:check, check:boundaries (297 files), test, test:rules, check, audit, test:db, test:realtime, test:auth, test:game-access, and test:challenges.
+- Test counts:
+  - Normal suite: 68 files, 877 passed.
+  - `test:challenges`: 5 files, 83 passed.
+  - `test:db`: 8 files, 79 passed.
+  - `test:realtime`: 10 files, 119 passed.
+  - `test:auth`: 8 files, 121 passed.
+  - `test:game-access`: 8 files, 100 passed.
+  - `test:rules`: 24 files, 291 passed.
+- 0 failed, 0 skipped, 0 todo. Audit: no known vulnerabilities.
+- No `any`, cast, `as const`, `ts-ignore`, `ts-expect-error`, `biome-ignore`, silent catch, unbounded map, secret, or client-authoritative readiness or time was added.
+
+### Status
+
+Pre-game lifecycle, ready barrier, and challenge acceptance: implemented, pending review. RESOLVED: GAME-START-LIFECYCLE-001, GAME-ACCESS-CREATION-API-001. New open gaps: LIVE-LIFECYCLE-EVENT-001, CHALLENGE-ACCEPT-STUCK-001, LIVE-START-SWEEP-SCHEDULER-001. Still open: LIVE-TIME-INCREMENT-001, LIVE-WRITER-OWNERSHIP-001, LIVE-RECOVERY-RESUME-001, LIVE-RECOVERY-PAUSED-REPLAY-001, LIVE-VIEW-ONLY-001, AUTH-RATE-LIMIT-DISTRIBUTED-001, AUTH-REVOCATION-BROADCAST-001, CHALLENGE-RATE-LIMIT-DISTRIBUTED-001, CHALLENGE-DURABLE-EVENTS-001.
+
+## PHASE 1 / BATCH 12.2 — CHALLENGE ACCEPTANCE RECOVERY + STUCK ACCEPTING RESOLUTION
+
+Review finding (2026-09-29): an `accepting` challenge could stay `accepting` forever (CHALLENGE-ACCEPT-STUCK-001). Local only, uncommitted, on branch `staging` at HEAD `d111dc1`, together with Batches 12 and 12.1. No commit, push, merge, deployment, or change to the remote, GitHub, Vercel, DNS, `chess-one.com`, or any credential. Changelog section 28 (CHAL-023 to CHAL-032); catalog sections 15.4 and 15.6. CHALLENGE-ACCEPT-STUCK-001 RESOLVED.
+
+### Built
+
+- **`domain/challenges`:** one new terminal status, `accept_failed`. It keeps the whole reservation (acceptance time, reserved game id, seats, start deadline), has no created game, and resolves at `max(now, acceptedAt)`, which may be after the challenge's own deadline. `failAcceptance(challenge, now)` (accepting only); the invariant checks it; `decideAcceptance` answers `failed` to the challenged player and changes nothing for anyone else.
+- **`server/challenges`:** one settlement procedure, `#settle`, for a fresh reservation, an accept retry, and maintenance, serialized per challenge in process (`KeyedSerializer`). A fresh reservation creates first; a retry and maintenance check first. The check's answer decides: `matches` accepts (even if an account was disabled since); `mismatch` reports a defect and fails (`game_mismatch`); `unknown` stays accepting (`creation_unconfirmed`); `absent` re-reads both accounts. An unreadable account stays accepting (`eligibility_unavailable`), an unavailable or ineligible one fails (`participant_unavailable`), and two eligible ones create the same reserved game again. Both final writes are compare-and-sets; a failed write stays accepting (`completion_failed`), and a lost one re-reads the row and takes the stored outcome. `reconcileAcceptingChallenges(limit, after)`: 1 to 100 challenges, oldest reservation first with ties by id, one at a time, with a resume cursor. `ChallengeStore.failAcceptance` and `listAccepting` ports. New facts: `challenge_accept_failed`, `challenge_accept_reconcile_started`, `challenge_accept_reconciled`, `challenge_accept_reconcile_unavailable`.
+- **`server/challenges-persistence`:** migration `003_challenge_accept_failed` (status and resolution checks, the reservation check includes `accept_failed`, the `challenges_accepting_order` partial index, and a replaced guard trigger: only `accepting` may become `accept_failed`, and the reservation never changes). The down migration restores the 002 definitions. `PostgresChallengeStore.failAcceptance` (compare-and-set on status and reserved game id) and `listAccepting` (keyset order on `(accepted_at, challenge_id)`).
+- **`server/game-access`:** `checkAssignedGame` answers `mismatch` for a live game stored under the id without an assignment (never `absent`), and compares the start deadline while the game still records it (awaiting or aborted). Creation, reconciliation, and check of one game id are serialized in process, so a check can no longer discard the pending assignment of a creation in flight.
+- **`server/edge`:** 409 `CHALLENGE_ACCEPT_FAILED`; `challenge.v1` status `accept_failed` with no game id and no reason.
+
+### Tests
+
+- **Recovery** `tests/challenges/acceptance-recovery.test.ts` (TST-CHAL-REC-001 to 016): races C, D, E, F, G, H, A, B (REC-001, 003 to 009); a creator refusal on the first accept (002); the bounded, ordered, resumable, idempotent maintenance pass (010); failure injection: creator unreachable after the reservation (011), the failure's final write failing or its reply lost (012), the challenge store failing during reconciliation (013), the eligibility lookup unavailable (014), a lost final compare-and-set (015); the facts (016).
+- **Domain** TST-CHAL-DOM-018 to 021 (the status, the invariant, decisions, and a property: accepting leads only to accepted or accept_failed and both are absorbing). **HTTP** TST-CHAL-HTTP-015 (one body for refused, disabled, locked, and mismatch).
+- **PostgreSQL** TST-CHAL-DB-026 to 032: constraints, the guard, race C and races A and B across two processes, races E to H, failure injection (a failing trigger on the final write, an unreadable table during reconciliation), and `listAccepting` order and cursor. TST-CHAL-DB-001 checks migration 003.
+- **Game access** TST-GACC-ASSIGN-010 to 012 (every compared field in every lifecycle; a stored game without an assignment is a mismatch; a check racing a creation of the same id). **Real stack** TST-GACC-CHAL-009 and 010 (the creation fails outright: 202, then the retried accept recreates the same game; a stuck acceptance survives a restart and the maintenance pass settles it).
+
+### Dependencies
+
+No new third-party dependency.
+
+### Gates (Node 24.21.0, pnpm 12.7.0, PostgreSQL 18, database `chess_one_test`)
+
+- All 13 gates pass (exit 0), run one at a time: typecheck, lint, format:check, check:boundaries (299 files), test, test:rules, check, audit, test:db, test:realtime, test:auth, test:game-access, and test:challenges.
+- Test counts:
+  - Normal suite: 69 files, 903 passed.
+  - `test:challenges`: 6 files, 111 passed.
+  - `test:db`: 8 files, 86 passed.
+  - `test:realtime`: 10 files, 119 passed.
+  - `test:auth`: 8 files, 121 passed.
+  - `test:game-access`: 8 files, 105 passed.
+  - `test:rules`: 24 files, 291 passed.
+- 0 failed, 0 skipped, 0 todo. Audit: no known vulnerabilities. No Batch 12.1 test was weakened or removed.
+- No `any`, cast, `as const`, `ts-ignore`, `ts-expect-error`, `biome-ignore`, silent catch, unbounded map, or secret was added. `writer-runtime.ts` and `connection.ts` are unchanged.
+
+### Status
+
+Acceptance recovery: implemented, pending review. RESOLVED: CHALLENGE-ACCEPT-STUCK-001. Still open: LIVE-LIFECYCLE-EVENT-001, LIVE-START-SWEEP-SCHEDULER-001, LIVE-TIME-INCREMENT-001, LIVE-WRITER-OWNERSHIP-001 (now also covering the cross-process window of CHAL-031), LIVE-RECOVERY-RESUME-001, LIVE-RECOVERY-PAUSED-REPLAY-001, LIVE-VIEW-ONLY-001, AUTH-RATE-LIMIT-DISTRIBUTED-001, AUTH-REVOCATION-BROADCAST-001, CHALLENGE-RATE-LIMIT-DISTRIBUTED-001, CHALLENGE-DURABLE-EVENTS-001.

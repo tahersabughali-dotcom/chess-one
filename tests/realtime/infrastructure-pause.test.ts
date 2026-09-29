@@ -80,6 +80,7 @@ describe("TST-RT-PAUSE persistence outage pauses play at the last durable balanc
       0,
     ]);
     expect(view.clock).toEqual({
+      initialMs: INITIAL_MS,
       remainingMs: { white: INITIAL_MS, black: INITIAL_MS },
       activeSide: "white",
       running: false,
@@ -200,6 +201,7 @@ describe("TST-RT-PAUSE persistence outage pauses play at the last durable balanc
     const view = await viewOf(writer);
     expect(view.status).toEqual({ kind: "active" });
     expect(view.clock).toEqual({
+      initialMs: 1_000,
       remainingMs: { white: 1_000, black: 1_000 },
       activeSide: "white",
       running: false,

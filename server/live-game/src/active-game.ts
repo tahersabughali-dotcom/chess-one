@@ -7,7 +7,14 @@ import {
   repetitionKey,
 } from "@chess-one/chess-rules";
 import { err, type GameSequence, ok, parseGameSequence, type Result } from "@chess-one/game-values";
-import { type ClockState, type MonotonicMs, startClock, type TimeControl } from "./clock.ts";
+import {
+  awaitingClock,
+  type ClockState,
+  type MonotonicMs,
+  startClock,
+  type TimeControl,
+  type WallClockMs,
+} from "./clock.ts";
 import type { CommandName, CommandShapeError } from "./commands.ts";
 import type { CommandId, ControlLeaseId, GameId, PlayerId, Seat } from "./ids.ts";
 import { ACTIVE, type GameStatus, positionFacts, statusFromFacts } from "./result.ts";
@@ -28,7 +35,9 @@ export type ResponseCode =
   | "InvalidCommandIdentity"
   | "MoveReceivedAfterDeadline"
   | "MatingPossibilityUnresolved"
-  | "TerminalPrecedenceUnresolved";
+  | "TerminalPrecedenceUnresolved"
+  | "GameNotStarted"
+  | "GameAbortedBeforeStart";
 
 export type UnauthorizedDetail =
   | "wrong_game"
@@ -141,6 +150,15 @@ export interface NewGame {
   readonly startPosition?: Position;
 }
 
+/**
+ * A game created to wait for its players (the product path): nothing runs
+ * until both are ready and the writer starts it, and it is aborted, never
+ * started, once `startDeadlineAtWallMs` passes.
+ */
+export interface NewAwaitingGame extends Omit<NewGame, "startedAtMonotonicMs"> {
+  readonly startDeadlineAtWallMs: WallClockMs;
+}
+
 export type NewGameError =
   | "same_player_on_both_seats"
   | "shared_control_lease"
@@ -151,13 +169,13 @@ function defect(message: string): never {
   throw new Error(`Live game defect: ${message}`);
 }
 
-const INITIAL_SEQUENCE: GameSequence = parseGameSequence(0) ?? defect("sequence 0 is invalid");
+export const INITIAL_SEQUENCE: GameSequence =
+  parseGameSequence(0) ?? defect("sequence 0 is invalid");
 
-/**
- * Sequence 0 is the created, running game. Each committed transition adds one.
- * The side to move of the start position has the running clock.
- */
-export function createActiveGame(game: NewGame): Result<ActiveGameState, NewGameError> {
+function createGame(
+  game: Omit<NewGame, "startedAtMonotonicMs">,
+  begin: (timeControl: TimeControl, firstToMove: Seat) => Pick<ActiveGameState, "clock" | "status">,
+): Result<ActiveGameState, NewGameError> {
   const rulesetId = game.rulesetId ?? DEFAULT_RULESET_ID;
   const position = game.startPosition ?? createInitialPosition(rulesetId);
   const { players, controlLeases, timeControl } = game;
@@ -168,7 +186,7 @@ export function createActiveGame(game: NewGame): Result<ActiveGameState, NewGame
   if (statusFromFacts(positionFacts(history, position)).kind !== "active") {
     return err("start_position_not_active");
   }
-  const clock = startClock(timeControl, game.startedAtMonotonicMs, position.sideToMove);
+  const { clock, status } = begin(timeControl, position.sideToMove);
   return ok(
     Object.freeze({
       gameId: game.gameId,
@@ -179,10 +197,36 @@ export function createActiveGame(game: NewGame): Result<ActiveGameState, NewGame
       history,
       sequence: INITIAL_SEQUENCE,
       clock,
-      status: ACTIVE,
+      status,
       pendingDrawOffer: null,
       lastDrawOfferMove: null,
       commandBindings: Object.freeze([]),
     }),
   );
+}
+
+/**
+ * Sequence 0 is the created, running game. Each committed transition adds one.
+ * The side to move of the start position has the running clock. A trusted
+ * seam for tests and tooling; no product flow creates a running game.
+ */
+export function createActiveGame(game: NewGame): Result<ActiveGameState, NewGameError> {
+  return createGame(game, (timeControl, firstToMove) => ({
+    clock: startClock(timeControl, game.startedAtMonotonicMs, firstToMove),
+    status: ACTIVE,
+  }));
+}
+
+/**
+ * Sequence 0 is the created game awaiting its players, with a stopped clock
+ * and no anchor. Its start (`startAwaitingGame`) is sequence 1.
+ */
+export function createAwaitingGame(game: NewAwaitingGame): Result<ActiveGameState, NewGameError> {
+  return createGame(game, (timeControl, firstToMove) => ({
+    clock: awaitingClock(timeControl, firstToMove),
+    status: Object.freeze({
+      kind: "awaiting_players",
+      startDeadlineAtWallMs: game.startDeadlineAtWallMs,
+    }),
+  }));
 }

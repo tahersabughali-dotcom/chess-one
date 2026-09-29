@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { GAME_ID, moveCommand, newGame } from "../live-game/support/harness.ts";
+import { GAME_ID, INITIAL_MS, moveCommand, newGame } from "../live-game/support/harness.ts";
 import { ContractRepository } from "../live-game-persistence/support/contract-repository.ts";
 import {
   DOMAIN_OLD,
@@ -102,6 +102,7 @@ describe("TST-RT-OWN concurrency conflicts stop the writer and pause the game (L
       OWNERSHIP,
     ]);
     expect(view.clock).toEqual({
+      initialMs: INITIAL_MS,
       remainingMs: stored.clock.remainingMs,
       activeSide: "black",
       running: false,

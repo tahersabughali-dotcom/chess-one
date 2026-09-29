@@ -14,6 +14,7 @@ import {
   isPlayerId,
   type PlayerId,
   type TimeControl,
+  type WallClockMs,
 } from "@chess-one/live-game-runtime";
 import {
   type AccountsHarness,
@@ -24,6 +25,7 @@ import {
 import { duration, GAME_ID, INITIAL_MS } from "../../live-game/support/harness.ts";
 import { DefectLog, RecordingFacts } from "../../realtime/support/facts.ts";
 import { type RuntimeHarness, runtimeHarness } from "../../realtime/support/runtime.ts";
+import { wallMs } from "../../realtime/support/time.ts";
 import { MemoryGameAccessStore } from "./memory-store.ts";
 
 export const TIME_CONTROL: TimeControl = Object.freeze({
@@ -101,7 +103,15 @@ export interface AssignedPlayers {
   readonly gameId: GameId;
 }
 
-/** Registers two accounts and creates their assigned game (white, black). */
+/** The start window a challenge grants: ten minutes of wall time. */
+export const START_WINDOW_MS = 10 * 60 * 1_000;
+
+/** The start deadline of a game assigned now on `runtime`'s wall clock. */
+export function startDeadlineFrom(runtime: RuntimeHarness): WallClockMs {
+  return wallMs(runtime.wallClock.now() + START_WINDOW_MS);
+}
+
+/** Registers two accounts and creates their assigned game (white, black), awaiting its players. */
 export async function assignedGame(
   h: GameAccessHarness,
   names: readonly [string, string] = ["Alice", "Bob"],
@@ -114,9 +124,32 @@ export async function assignedGame(
     white: white.account.userId,
     black: black.account.userId,
     timeControl: TIME_CONTROL,
+    startDeadlineAtWallMs: startDeadlineFrom(h.runtime),
   });
   if (!created.ok) throw new Error(`game not assigned: ${created.error.kind}`);
   return { white: sessionOf(h, white), black: sessionOf(h, black), gameId };
+}
+
+/** A connection's presence as the edge keeps it: open until the connection closes. */
+export function openPresence(): { open: boolean } {
+  return { open: true };
+}
+
+/**
+ * Both seats claimed and declared ready, so the writer started the game:
+ * sequence 1, White's clock running. Returns the two leases.
+ */
+export async function startedGame(
+  players: AssignedPlayers,
+): Promise<{ readonly white: ControlLeaseId; readonly black: ControlLeaseId }> {
+  const { gameId } = players;
+  const white = await grantedLease(players.white.authority, gameId);
+  const black = await grantedLease(players.black.authority, gameId);
+  const first = await players.white.authority.ready(gameId, openPresence());
+  if (first.kind !== "ready") throw new Error(`white not ready: ${first.kind}`);
+  const second = await players.black.authority.ready(gameId, openPresence());
+  if (second.kind !== "started") throw new Error(`game not started: ${second.kind}`);
+  return { white, black };
 }
 
 export async function heldLease(

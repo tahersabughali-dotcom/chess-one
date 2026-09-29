@@ -1,4 +1,5 @@
 import type { AccountsApi } from "@chess-one/accounts";
+import type { ChallengeApi } from "@chess-one/challenges";
 import type { FactSink, MonotonicClock, WriterDirectory } from "@chess-one/live-game-runtime";
 import {
   type SessionCookieMode,
@@ -88,6 +89,14 @@ export interface EdgeAuthConfig {
   readonly cookie: SessionCookieMode;
 }
 
+/**
+ * The HTTP challenge routes, authenticated with the auth routes' session
+ * cookie. Absent: the edge serves no `/challenges` routes.
+ */
+export interface EdgeChallengesConfig {
+  readonly challenges: ChallengeApi;
+}
+
 export interface EdgeConfig {
   readonly environment: "production" | "test";
   /** Exact browser origins, such as `https://play.example`. Never `*`. */
@@ -100,6 +109,8 @@ export interface EdgeConfig {
   readonly reportDefect: (error: unknown) => void;
   readonly limits?: Partial<EdgeLimits>;
   readonly auth?: EdgeAuthConfig;
+  /** Needs `auth`: challenges are for signed-in accounts only. */
+  readonly challenges?: EdgeChallengesConfig;
 }
 
 export interface ResolvedEdgeAuth {
@@ -111,6 +122,7 @@ export interface ResolvedEdgeConfig {
   readonly environment: "production" | "test";
   readonly allowedOrigins: ReadonlySet<string>;
   readonly auth: ResolvedEdgeAuth | null;
+  readonly challenges: ChallengeApi | null;
   readonly sessionResolver: TrustedSessionResolver;
   readonly writers: WriterDirectory;
   readonly clock: MonotonicClock;
@@ -183,10 +195,15 @@ export function resolveEdgeConfig(config: EdgeConfig): ResolvedEdgeConfig {
   const origins = new Set(
     config.allowedOrigins.map((origin) => checkOrigin(origin, config.environment)),
   );
+  const auth = resolveAuth(config);
+  if (config.challenges !== undefined && auth === null) {
+    throw new EdgeConfigError("Challenge routes need the auth configuration");
+  }
   return Object.freeze({
     environment: config.environment,
     allowedOrigins: origins,
-    auth: resolveAuth(config),
+    auth,
+    challenges: config.challenges?.challenges ?? null,
     sessionResolver: resolver,
     writers: config.writers,
     clock: config.clock,

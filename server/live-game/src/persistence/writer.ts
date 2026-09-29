@@ -2,6 +2,8 @@ import { type Color, type DurationMs, err, ok, type Result } from "@chess-one/ga
 import {
   type ActiveGameState,
   createActiveGame,
+  createAwaitingGame,
+  type NewAwaitingGame,
   type NewGame,
   type NewGameError,
 } from "../active-game.ts";
@@ -11,6 +13,7 @@ import { type LiveGameCommand, parseCommand } from "../commands.ts";
 import { withControlLease } from "../control-lease.ts";
 import type { AuthorizedGameActor, CommandDecision, Ingress } from "../decision.ts";
 import type { ControlLeaseId, GameId, Seat } from "../ids.ts";
+import type { LifecycleDecision } from "../lifecycle.ts";
 import { type DeadlineDecision, processCommand, processDeadline } from "../process-command.ts";
 import {
   type ClockDomainId,
@@ -51,12 +54,16 @@ export interface RecoveryPaused {
 }
 
 /**
- * A stored game as one writer sees it: an active game whose clock runs in this
- * writer's domain, a finished game, a game stopped on an unresolved rules
- * question, or an active game paused by the loss of the clock domain that
- * stored it. Only the pause is an infrastructure condition; it has no result.
+ * A stored game as one writer sees it: a game awaiting its players (no clock
+ * has run, so no clock domain matters and a restart never pauses it), a game
+ * aborted before its start, an active game whose clock runs in this writer's
+ * domain, a finished game, a game stopped on an unresolved rules question,
+ * or an active game paused by the loss of the clock domain that stored it.
+ * Only the pause is an infrastructure condition; it has no result.
  */
 export type GameCondition =
+  | { readonly kind: "awaiting_players" }
+  | { readonly kind: "aborted_before_start" }
   | { readonly kind: "running" }
   | { readonly kind: "finished" }
   | { readonly kind: "rules_unresolved" }
@@ -91,6 +98,8 @@ export interface LeaseRotation {
   readonly changed: boolean;
 }
 
+const AWAITING_PLAYERS: GameCondition = Object.freeze({ kind: "awaiting_players" });
+const ABORTED_BEFORE_START: GameCondition = Object.freeze({ kind: "aborted_before_start" });
 const RUNNING: GameCondition = Object.freeze({ kind: "running" });
 const FINISHED: GameCondition = Object.freeze({ kind: "finished" });
 const RULES_UNRESOLVED: GameCondition = Object.freeze({ kind: "rules_unresolved" });
@@ -108,6 +117,11 @@ function writerDefect(message: string): never {
 export function gameCondition(stored: StoredGame, current: ClockDomainId): GameCondition {
   const { state, clockDomainId } = stored;
   switch (state.status.kind) {
+    case "awaiting_players":
+      if (state.clock.running) writerDefect("an awaiting game has a running clock");
+      return AWAITING_PLAYERS;
+    case "aborted_before_start":
+      return ABORTED_BEFORE_START;
     case "finished":
       return FINISHED;
     case "unresolved":
@@ -158,6 +172,70 @@ export async function startGame(
   if (!created.ok) return created;
   const stored = await writer.repository.createGame(created.value, writer.clockDomainId);
   return stored.ok ? ok(created.value) : err(stored.error);
+}
+
+/**
+ * Creates and stores a new game awaiting its players: sequence 0, no clock
+ * running, and no anchor, so the stored clock domain is never read for it.
+ */
+export async function storeAwaitingGame(
+  writer: LiveGameWriter,
+  game: NewAwaitingGame,
+): Promise<Result<ActiveGameState, NewGameError | CreateError>> {
+  const created = createAwaitingGame(game);
+  if (!created.ok) return created;
+  const stored = await writer.repository.createGame(created.value, writer.clockDomainId);
+  return stored.ok ? ok(created.value) : err(stored.error);
+}
+
+/** What a lifecycle step did: the start, the abort, or nothing (the game was not awaiting). */
+export interface LifecycleExecution {
+  readonly kind: "started" | "aborted" | "unchanged";
+  readonly state: ActiveGameState;
+  readonly condition: GameCondition;
+}
+
+/**
+ * The writer's one lifecycle step for a game awaiting its players: loads the
+ * stored game, and while it is still awaiting, applies `decide` to the
+ * stored state and commits the start or the abort (sequence 0 to 1) as one
+ * compare-and-set. `decide` runs after the load, so an instant it reads
+ * (the start's monotonic anchor) is taken inside the step. The commit
+ * stores this writer's clock domain with the newly anchored clock.
+ */
+export async function executeLifecycle(
+  writer: LiveGameWriter,
+  gameId: GameId,
+  decide: (state: ActiveGameState) => LifecycleDecision,
+): Promise<Result<LifecycleExecution, LoadError | CommitError>> {
+  const loaded = await loadForWriter(writer, gameId);
+  if (!loaded.ok) return err(loaded.error);
+  const { state, condition } = loaded.value;
+  if (condition.kind !== "awaiting_players") return ok({ kind: "unchanged", state, condition });
+  const decision = decide(state);
+  if (decision.kind === "not_awaiting") return ok({ kind: "unchanged", state, condition });
+  return commitLifecycle(writer, state, decision);
+}
+
+/**
+ * Commits `decision`, made on `previous`, an awaiting game as this writer
+ * just loaded it, as one compare-and-set on its sequence.
+ */
+export async function commitLifecycle(
+  writer: LiveGameWriter,
+  previous: ActiveGameState,
+  decision: LifecycleDecision,
+): Promise<Result<LifecycleExecution, CommitError>> {
+  if (decision.kind === "not_awaiting") writerDefect("a lifecycle step on a game not awaiting");
+  const plan = planCommit(previous, decision.nextState, []);
+  if (plan === null) writerDefect("a lifecycle step changed nothing");
+  const committed = await writer.repository.commitDecision(plan, writer.clockDomainId);
+  if (!committed.ok) return err(committed.error);
+  return ok({
+    kind: decision.kind,
+    state: decision.nextState,
+    condition: decision.kind === "started" ? RUNNING : ABORTED_BEFORE_START,
+  });
 }
 
 /**

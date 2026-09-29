@@ -1,4 +1,4 @@
-import type { AccountStatus, UserId } from "@chess-one/identity";
+import type { AccountStatus, CanonicalUsername, UserId } from "@chess-one/identity";
 import type {
   AccountDirectory,
   AccountStanding,
@@ -9,6 +9,8 @@ import type {
   ChangePasswordError,
   LoginError,
   Outcome,
+  PlayerDirectory,
+  PlayerRecord,
   RegisterError,
   ResetPasswordError,
   ResetRequestError,
@@ -41,7 +43,21 @@ import {
  * The accounts application: registration, login, sessions, and recovery over
  * an `AccountsRepository`. It knows nothing of HTTP, cookies, or games.
  */
-export class Accounts implements AccountsApi, AccountDirectory {
+function playerRecord(account: {
+  readonly userId: UserId;
+  readonly username: string;
+  readonly status: AccountStatus;
+  readonly emailVerified: boolean;
+}): PlayerRecord {
+  return Object.freeze({
+    userId: account.userId,
+    username: account.username,
+    status: account.status,
+    emailVerified: account.emailVerified,
+  });
+}
+
+export class Accounts implements AccountsApi, AccountDirectory, PlayerDirectory {
   readonly #context: AccountsContext;
 
   constructor(config: AccountsConfig) {
@@ -161,6 +177,20 @@ export class Accounts implements AccountsApi, AccountDirectory {
     const profile = await this.#context.repository.getProfile(userId);
     if (profile === null) return null;
     return Object.freeze({ status: profile.status, emailVerified: profile.emailVerified });
+  }
+
+  /** Exact lookup by canonical username for trusted use cases (direct challenges). */
+  async findPlayerByUsername(username: CanonicalUsername): Promise<PlayerRecord | null> {
+    const account = await this.#context.repository.findLoginAccount({
+      kind: "username",
+      canonical: username,
+    });
+    return account === null ? null : playerRecord(account);
+  }
+
+  async findPlayerById(userId: UserId): Promise<PlayerRecord | null> {
+    const profile = await this.#context.repository.getProfile(userId);
+    return profile === null ? null : playerRecord(profile);
   }
 
   onSessionsEnded(listener: SessionEndListener): () => void {

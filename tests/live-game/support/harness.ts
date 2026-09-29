@@ -9,6 +9,7 @@ import {
   type CommandId,
   type ControlLeaseId,
   createActiveGame,
+  createAwaitingGame,
   type GameId,
   type Ingress,
   isCommandId,
@@ -16,6 +17,7 @@ import {
   isGameId,
   isMonotonicMs,
   isPlayerId,
+  isWallClockMs,
   type LiveGameCommand,
   type MonotonicMs,
   OFFER_DRAW_COMMAND_V1,
@@ -29,6 +31,7 @@ import {
   type Seat,
   SUBMIT_MOVE_COMMAND_V1,
   type SubmitMoveCommandV1,
+  type WallClockMs,
 } from "@chess-one/live-game";
 
 /**
@@ -102,6 +105,29 @@ export function newGame(options: GameOptions = {}): ActiveGameState {
     timeControl: { kind: "sudden_death", initialMs: duration(options.initialMs ?? INITIAL_MS) },
     startedAtMonotonicMs: ms(options.startedAt ?? START_MS),
     ...(options.startPosition === undefined ? {} : { startPosition: options.startPosition }),
+  });
+  if (!created.ok) throw new Error(`game not created: ${created.error}`);
+  return created.value;
+}
+
+/** 2030-01-01T00:10:00Z: the start deadline of `awaitingGame` unless another is given. */
+export const START_DEADLINE_MS = 1_893_456_600_000;
+
+export function wallClockMs(value: number): WallClockMs {
+  if (!isWallClockMs(value)) throw new Error(`invalid wall time ${value}`);
+  return value;
+}
+
+/** A game awaiting its players (sequence 0, clock stopped) with a wall-clock start deadline. */
+export function awaitingGame(
+  options: { readonly initialMs?: number; readonly startDeadlineAt?: number } = {},
+): ActiveGameState {
+  const created = createAwaitingGame({
+    gameId: GAME_ID,
+    players: PLAYERS,
+    controlLeases: LEASES,
+    timeControl: { kind: "sudden_death", initialMs: duration(options.initialMs ?? INITIAL_MS) },
+    startDeadlineAtWallMs: wallClockMs(options.startDeadlineAt ?? START_DEADLINE_MS),
   });
   if (!created.ok) throw new Error(`game not created: ${created.error}`);
   return created.value;

@@ -1,3 +1,4 @@
+export { isRulesetId, type RulesetId } from "@chess-one/chess-rules";
 export type { Color } from "@chess-one/game-values";
 export {
   type AuthorizedGameActor,
@@ -8,6 +9,7 @@ export {
   type CommandResponse,
   type ControlLeaseId,
   type GameId,
+  type GameLifecycle,
   type GameParticipant,
   type GameResult,
   type GameStatus,
@@ -15,9 +17,12 @@ export {
   isControlLeaseId,
   isGameId,
   isPlayerId,
+  isWallClockMs,
   type LeaselessCommand,
   type LiveGameCommand,
+  lifecycleOf,
   type MonotonicMs,
+  type NewAwaitingGame,
   OFFER_DRAW_COMMAND_V1,
   type OfferDrawCommandV1,
   type PlayerId,
@@ -30,10 +35,18 @@ export {
   type Seat,
   SUBMIT_MOVE_COMMAND_V1,
   type SubmitMoveCommandV1,
+  suddenDeath,
   type TimeControl,
+  type WallClockMs,
 } from "@chess-one/live-game";
 export { BoundedQueue } from "./bounded-queue.ts";
-export type { ClockDomain, MonotonicClock, WakeHandle, WakeScheduler } from "./clock.ts";
+export type {
+  ClockDomain,
+  MonotonicClock,
+  WakeHandle,
+  WakeScheduler,
+  WallClock,
+} from "./clock.ts";
 export type { FactSink, RetireReason, RuntimeFact } from "./facts.ts";
 export type { ClockView, DrawOfferView, GameView } from "./game-view.ts";
 export {
@@ -48,7 +61,11 @@ export {
   type WriterDirectory,
   type WriterRefused,
 } from "./registry.ts";
-export { createSystemClockDomain, createSystemWakeScheduler } from "./system.ts";
+export {
+  createSystemClockDomain,
+  createSystemWakeScheduler,
+  createSystemWallClock,
+} from "./system.ts";
 export type {
   Activation,
   CommandIngress,
@@ -60,6 +77,11 @@ export type {
   GameWriterPort,
   IngressRefused,
   LeaseOutcome,
+  NotInPlay,
+  Readiness,
+  ReadyOutcome,
+  ReadyPresence,
+  ReadyRefusal,
   RecoveryRequired,
   ReplayOutcome,
   SubscribeResult,

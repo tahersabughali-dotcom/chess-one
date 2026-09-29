@@ -1,10 +1,17 @@
-import { isClockDomainId, isMonotonicMs, type MonotonicMs } from "@chess-one/live-game";
-import type { ClockDomain, WakeHandle, WakeScheduler } from "./clock.ts";
+import {
+  isClockDomainId,
+  isMonotonicMs,
+  isWallClockMs,
+  type MonotonicMs,
+  type WallClockMs,
+} from "@chess-one/live-game";
+import type { ClockDomain, WakeHandle, WakeScheduler, WallClock } from "./clock.ts";
 
 /**
  * The runtime's only contact with the host's clock and timers. The boundary
- * checker allows `process.hrtime`, `crypto.randomUUID`, `setTimeout`, and
- * `clearTimeout` in this file and nowhere else in the runtime.
+ * checker allows `process.hrtime`, `crypto.randomUUID`, `Date.now`,
+ * `setTimeout`, and `clearTimeout` in this file and nowhere else in the
+ * runtime.
  */
 
 const NANOS_PER_MS = 1_000_000n;
@@ -34,6 +41,16 @@ export function createSystemClockDomain(): ClockDomain {
         return isMonotonicMs(ms) ? ms : systemDefect("monotonic reading");
       },
     }),
+  });
+}
+
+/** The host's UTC wall clock, in whole epoch milliseconds, for the start deadline only. */
+export function createSystemWallClock(): WallClock {
+  return Object.freeze({
+    now(): WallClockMs {
+      const ms = Date.now();
+      return isWallClockMs(ms) ? ms : systemDefect("wall-clock reading");
+    },
   });
 }
 

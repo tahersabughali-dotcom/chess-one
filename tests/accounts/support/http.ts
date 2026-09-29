@@ -1,6 +1,7 @@
 import type { AuthenticatedSession } from "@chess-one/accounts";
 import {
   createRealtimeEdge,
+  type EdgeChallengesConfig,
   type EdgeFact,
   type EdgeLimits,
   LOOPBACK_SESSION_COOKIE,
@@ -79,6 +80,7 @@ export interface AuthEdgeOptions extends AccountsHarnessOptions {
   readonly runtime?: RuntimeHarness;
   readonly limits?: Partial<EdgeLimits>;
   readonly accountsHarness?: AccountsHarness;
+  readonly challenges?: EdgeChallengesConfig;
 }
 
 export interface AuthEdge {
@@ -113,6 +115,7 @@ export function authEdge(options: AuthEdgeOptions = {}): AuthEdge {
     reportDefect: defects.report,
     auth: { accounts: h.accounts, cookie: "insecure_loopback" },
     ...(options.limits === undefined ? {} : { limits: options.limits }),
+    ...(options.challenges === undefined ? {} : { challenges: options.challenges }),
   });
   let closing: Promise<void> | null = null;
   return {

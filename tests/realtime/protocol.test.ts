@@ -9,20 +9,27 @@ import {
   SNAPSHOT_FORMAT,
   TokenBucket,
 } from "@chess-one/edge";
+import { abortIfStartDeadlinePassed } from "@chess-one/live-game";
 import { BoundedQueue } from "@chess-one/live-game-runtime";
 import { describe, expect, it } from "vitest";
 import {
+  awaitingGame,
   GAME_ID,
+  INITIAL_MS,
   moveCommand,
   newGame,
   offerCommand,
   resignCommand,
   respondCommand,
+  START_DEADLINE_MS,
   submit,
+  wallClockMs,
 } from "../live-game/support/harness.ts";
 import { runtimeHarness, store, viewOf, writerOf } from "./support/runtime.ts";
 
 const LIMITS = { maxDepth: 2, maxStringLength: 16, maxObjectKeys: 4, maxArrayLength: 2 };
+const BOTH_READY = Object.freeze({ white: true, black: true });
+const WHITE_READY = Object.freeze({ white: true, black: false });
 
 describe("TST-PROTO strict JSON", () => {
   it("TST-PROTO-001 objects are Maps: __proto__, constructor, and prototype are plain keys and pollute nothing", () => {
@@ -197,11 +204,11 @@ describe("TST-PROTO client messages", () => {
 });
 
 describe("TST-PROTO server encoding", () => {
-  it("TST-PROTO-020 game_snapshot.v1 has exactly its documented fields and no internals", async () => {
+  it("TST-PROTO-020 game_snapshot.v2 has exactly its documented fields and no internals", async () => {
     const h = runtimeHarness();
     await store(h, newGame());
     const view = await viewOf(writerOf(h));
-    const snapshot = encodeSnapshot(view, "black", false);
+    const snapshot = encodeSnapshot(view, "black", false, BOTH_READY);
     expect(Object.keys(snapshot).sort()).toEqual(
       [
         "canClaimControl",
@@ -209,6 +216,9 @@ describe("TST-PROTO server encoding", () => {
         "controlHeld",
         "format",
         "gameId",
+        "gameLifecycle",
+        "myReady",
+        "opponentReady",
         "pendingDrawOffer",
         "playable",
         "positionFen",
@@ -218,13 +228,22 @@ describe("TST-PROTO server encoding", () => {
         "seat",
         "sequence",
         "sideToMove",
+        "startDeadlineAt",
         "status",
       ].sort(),
     );
-    expect(snapshot.format).toBe(SNAPSHOT_FORMAT);
+    expect(snapshot.format).toBe("game_snapshot.v2");
+    expect(SNAPSHOT_FORMAT).toBe("game_snapshot.v2");
     expect(snapshot.seat).toBe("black");
-    expect(snapshot).toMatchObject({ controlHeld: false, canClaimControl: true });
-    expect(encodeSnapshot(view, "black", true)).toMatchObject({
+    expect(snapshot).toMatchObject({
+      controlHeld: false,
+      canClaimControl: true,
+      gameLifecycle: "in_progress",
+      startDeadlineAt: null,
+      myReady: false,
+      opponentReady: false,
+    });
+    expect(encodeSnapshot(view, "black", true, BOTH_READY)).toMatchObject({
       controlHeld: true,
       canClaimControl: false,
     });
@@ -235,6 +254,71 @@ describe("TST-PROTO server encoding", () => {
       "running",
       "whiteMs",
     ]);
+  });
+
+  it("TST-PROTO-030 an awaiting game's snapshot: lifecycle, epoch-ms start deadline, per-seat readiness, clock stopped, claimable", async () => {
+    const h = runtimeHarness();
+    await store(h, awaitingGame());
+    const view = await viewOf(writerOf(h));
+    const asBlack = encodeSnapshot(view, "black", false, WHITE_READY);
+    expect(asBlack).toMatchObject({
+      sequence: 0,
+      gameLifecycle: "awaiting_players",
+      startDeadlineAt: START_DEADLINE_MS,
+      status: { kind: "awaiting_players" },
+      myReady: false,
+      opponentReady: true,
+      canClaimControl: true,
+      playable: false,
+      recoveryRequired: false,
+      clock: { whiteMs: INITIAL_MS, blackMs: INITIAL_MS, running: false, activeSide: "white" },
+    });
+    expect(encodeSnapshot(view, "white", true, WHITE_READY)).toMatchObject({
+      myReady: true,
+      opponentReady: false,
+      canClaimControl: false,
+    });
+    expect(JSON.stringify(asBlack)).not.toMatch(/lease|session|player-|anchor/i);
+  });
+
+  it("TST-PROTO-031 an aborted game's snapshot: its own status and lifecycle, no deadline, no readiness, not claimable", async () => {
+    const aborted = abortIfStartDeadlinePassed(awaitingGame(), wallClockMs(START_DEADLINE_MS));
+    if (aborted === null) throw new Error("not aborted at the deadline");
+    const h = runtimeHarness();
+    await store(h, aborted);
+    const view = await viewOf(writerOf(h));
+    expect(view.condition).toBe("aborted_before_start");
+    expect(encodeSnapshot(view, "white", false, BOTH_READY)).toMatchObject({
+      sequence: 1,
+      gameLifecycle: "aborted_before_start",
+      status: { kind: "aborted_before_start", reason: "START_DEADLINE_PASSED" },
+      startDeadlineAt: null,
+      myReady: false,
+      opponentReady: false,
+      canClaimControl: false,
+      playable: false,
+      clock: { whiteMs: INITIAL_MS, blackMs: INITIAL_MS, running: false },
+    });
+  });
+
+  it("TST-PROTO-032 ready_game is a closed message: type, optional requestId, and gameId only", () => {
+    expect(
+      decodeClientMessage('{"type":"ready_game","requestId":"r-1","gameId":"game-1"}'),
+    ).toEqual({ ok: true, message: { type: "ready_game", requestId: "r-1", gameId: "game-1" } });
+    expect(decodeClientMessage('{"type":"ready_game","gameId":"game-1"}')).toEqual({
+      ok: true,
+      message: { type: "ready_game", requestId: null, gameId: "game-1" },
+    });
+    expect(decodeClientMessage('{"type":"ready_game"}')).toEqual({
+      ok: false,
+      violation: { code: "MISSING_FIELD", field: "gameId" },
+    });
+    for (const extra of ['"ready":true', '"seat":"white"', '"startedAt":1', '"actorId":"x"']) {
+      expect(decodeClientMessage(`{"type":"ready_game","gameId":"game-1",${extra}}`)).toEqual({
+        ok: false,
+        violation: { code: "UNKNOWN_FIELD", field: null },
+      });
+    }
   });
 
   it("TST-PROTO-021 a command response on the wire carries no receivedAt, anchor, or lease", () => {

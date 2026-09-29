@@ -396,7 +396,7 @@ describe("TST-EDGE parsing security: nothing invalid reaches the runtime", () =>
 });
 
 describe("TST-EDGE live play over WebSocket", () => {
-  it("TST-EDGE-020 sync returns game_snapshot.v1 with no monotonic anchor, lease, binding, or player id", async () => {
+  it("TST-EDGE-020 sync returns game_snapshot.v2 with no monotonic anchor, lease, binding, or player id", async () => {
     const h = await start();
     const s0 = newGame();
     await store(h.runtime, s0);
@@ -406,7 +406,7 @@ describe("TST-EDGE live play over WebSocket", () => {
       type: "game_snapshot",
       requestId: "sync-7",
       snapshot: {
-        format: "game_snapshot.v1",
+        format: "game_snapshot.v2",
         gameId: GAME_ID,
         rulesetId: s0.rulesetId,
         sequence: 0,
@@ -415,6 +415,10 @@ describe("TST-EDGE live play over WebSocket", () => {
         seat: "white",
         controlHeld: true,
         canClaimControl: false,
+        gameLifecycle: "in_progress",
+        startDeadlineAt: null,
+        myReady: false,
+        opponentReady: false,
         status: { kind: "active" },
         playable: true,
         recoveryRequired: false,

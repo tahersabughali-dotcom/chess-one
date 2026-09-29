@@ -1,0 +1,20 @@
+{
+  "name": "@chess-one/tests-challenges",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "@chess-one/accounts": "workspace:*",
+    "@chess-one/accounts-persistence": "workspace:*",
+    "@chess-one/challenge-domain": "workspace:*",
+    "@chess-one/challenges": "workspace:*",
+    "@chess-one/challenges-persistence": "workspace:*",
+    "@chess-one/chess-rules": "workspace:*",
+    "@chess-one/edge": "workspace:*",
+    "@chess-one/identity": "workspace:*",
+    "@chess-one/live-game-persistence": "workspace:*",
+    "@chess-one/live-game-runtime": "workspace:*",
+    "kysely": "0.29.6",
+    "pg": "8.23.0"
+  }
+}

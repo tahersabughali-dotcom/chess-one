@@ -50,7 +50,12 @@ describe("TST-RT-CREATE a create reported failed is reconciled by a fresh read, 
     expect([view.condition, view.recoveryReason, view.clock]).toEqual([
       "infrastructure_paused",
       "PERSISTENCE_UNAVAILABLE",
-      { remainingMs: { white: 1_000, black: 1_000 }, activeSide: "white", running: false },
+      {
+        initialMs: 1_000,
+        remainingMs: { white: 1_000, black: 1_000 },
+        activeSide: "white",
+        running: false,
+      },
     ]);
     expect(submitAs(writer, stored, "white", moveCommand(stored, "e2e4")).ingress).toEqual({
       accepted: false,
@@ -125,7 +130,12 @@ describe("TST-RT-CREATE a create reported failed is reconciled by a fresh read, 
     expect([view.condition, view.recoveryReason, view.clock]).toEqual([
       "infrastructure_paused",
       "CREATE_RECONCILIATION_REQUIRED",
-      { remainingMs: { white: 1_000, black: 1_000 }, activeSide: "white", running: false },
+      {
+        initialMs: 1_000,
+        remainingMs: { white: 1_000, black: 1_000 },
+        activeSide: "white",
+        running: false,
+      },
     ]);
     expect(submitAs(writer, stored, "white", moveCommand(stored, "e2e4")).ingress).toEqual({
       accepted: false,

@@ -1,5 +1,6 @@
 import {
   type ActiveGameState,
+  type AwaitingGameIndex,
   type ClockDomainId,
   type CommandResponse,
   type GameId,
@@ -15,16 +16,18 @@ import {
   type GameView,
   type GameWriterPort,
   GameWriterRegistry,
+  type Readiness,
   type RecoveryReason,
   type RuntimeFact,
   type RuntimeLimits,
   type SyncOutcome,
+  type WallClock,
 } from "@chess-one/live-game-runtime";
 import { actorFor, GAME_ID, START_MS } from "../../live-game/support/harness.ts";
 import { ContractRepository } from "../../live-game-persistence/support/contract-repository.ts";
 import { DefectLog, RecordingFacts } from "./facts.ts";
 import { ControlledRepository } from "./repositories.ts";
-import { ManualClock, ManualScheduler, type ManualWake } from "./time.ts";
+import { ManualClock, ManualScheduler, type ManualWake, ManualWallTime } from "./time.ts";
 
 export function domain(name: string): ClockDomainId {
   if (!isClockDomainId(name)) throw new Error(`invalid clock domain ${name}`);
@@ -38,6 +41,8 @@ export const IDLE_MS = 777_777;
 
 export interface RuntimeHarness {
   readonly clock: ManualClock;
+  /** The wall clock start deadlines are judged on; a `ManualWallTime` unless one was given. */
+  readonly wallClock: WallClock;
   readonly scheduler: ManualScheduler;
   readonly facts: RecordingFacts<RuntimeFact>;
   readonly defects: DefectLog;
@@ -51,6 +56,8 @@ export function runtimeHarness(
   limits: Partial<RuntimeLimits> = {},
   contract: LiveGameRepository = new ContractRepository(),
   domainId = DOMAIN_A,
+  wallClock: WallClock = new ManualWallTime(),
+  awaitingGames?: AwaitingGameIndex,
 ): RuntimeHarness {
   const clock = new ManualClock(START_MS);
   const scheduler = new ManualScheduler();
@@ -64,8 +71,10 @@ export function runtimeHarness(
     facts,
     reportDefect: defects.report,
     limits: { idleRetireMs: IDLE_MS, ...limits },
+    wallClock,
+    ...(awaitingGames === undefined ? {} : { awaitingGames }),
   });
-  return { clock, scheduler, facts, defects, contract, repository, registry };
+  return { clock, wallClock, scheduler, facts, defects, contract, repository, registry };
 }
 
 export async function store(
@@ -146,10 +155,15 @@ export async function storedState(harness: RuntimeHarness): Promise<ActiveGameSt
 export class RecordingSubscriber implements GameSubscriber {
   readonly views: GameView[] = [];
   readonly recoveries: RecoveryReason[] = [];
+  readonly readiness: Readiness[] = [];
   stopped = 0;
 
   onUpdate(view: GameView): void {
     this.views.push(view);
+  }
+
+  onReadinessChanged(_gameId: GameId, readiness: Readiness): void {
+    this.readiness.push(readiness);
   }
 
   onRecoveryRequired(_gameId: GameId, reason: RecoveryReason): void {

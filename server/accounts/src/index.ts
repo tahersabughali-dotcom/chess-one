@@ -14,6 +14,8 @@ export type {
   IssuedSession,
   LoginError,
   Outcome,
+  PlayerDirectory,
+  PlayerRecord,
   RateLimited,
   RegisterError,
   ResetPasswordError,

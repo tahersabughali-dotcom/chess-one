@@ -15,7 +15,13 @@ import {
   type GameAccessSchema,
   withGameAccessSchema,
 } from "./support/db.ts";
-import { gameAccessHarness, playerOf, sessionOf, TIME_CONTROL } from "./support/harness.ts";
+import {
+  gameAccessHarness,
+  playerOf,
+  sessionOf,
+  startDeadlineFrom,
+  TIME_CONTROL,
+} from "./support/harness.ts";
 
 const APP = "chess-one-game-access-db-test";
 
@@ -357,6 +363,7 @@ describe("TST-GACC-DB game-access tables on PostgreSQL", () => {
         white: alice.account.userId,
         black: bob.account.userId,
         timeControl: TIME_CONTROL,
+        startDeadlineAtWallMs: startDeadlineFrom(h.runtime),
       });
       expect(assigned.ok).toBe(true);
       h.access.dispose();

@@ -1,0 +1,14 @@
+{
+  "name": "@chess-one/challenges",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@chess-one/accounts": "workspace:*",
+    "@chess-one/challenge-domain": "workspace:*",
+    "@chess-one/identity": "workspace:*"
+  }
+}

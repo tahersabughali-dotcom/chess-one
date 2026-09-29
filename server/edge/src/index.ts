@@ -23,9 +23,28 @@ export {
   type AuthSessionsWire,
   type AuthUserWire,
 } from "./auth/wire.ts";
+export { challengeGameCreator } from "./challenges/game-creation.ts";
+export {
+  CHALLENGE_BODY_LIMIT,
+  CHALLENGE_JSON_LIMITS,
+  CHALLENGES_PREFIX,
+} from "./challenges/routes.ts";
+export {
+  CHALLENGE_ACCEPT_FORMAT,
+  CHALLENGE_ERROR_FORMAT,
+  CHALLENGE_FORMAT,
+  CHALLENGE_PAGE_FORMAT,
+  type ChallengeAcceptWire,
+  type ChallengeBodyWire,
+  type ChallengeErrorCode,
+  type ChallengeErrorWire,
+  type ChallengePageWire,
+  type ChallengeWire,
+} from "./challenges/wire.ts";
 export {
   DEFAULT_EDGE_LIMITS,
   type EdgeAuthConfig,
+  type EdgeChallengesConfig,
   type EdgeConfig,
   EdgeConfigError,
   type EdgeLimits,
@@ -63,6 +82,7 @@ export {
   encodeCommandResponse,
   encodeSnapshot,
   encodeStatus,
+  otherSeat,
   type RequestFailure,
   type ServerMessage,
   SNAPSHOT_FORMAT,

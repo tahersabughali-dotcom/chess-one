@@ -20,6 +20,7 @@ import {
   moveMessage,
   signUp,
   socketOf,
+  startFromOtherSessions,
 } from "./support/stack.ts";
 
 async function withStack(
@@ -52,6 +53,13 @@ async function players(stack: AccessStack): Promise<Players> {
     whiteCookie: await logIn(stack, "whitey"),
     blackCookie: await logIn(stack, "blacky"),
   };
+}
+
+/** The players of a game already in progress (sequence 1), started by sessions the test never uses. */
+async function started(stack: AccessStack): Promise<Players> {
+  const p = await players(stack);
+  await startFromOtherSessions(stack, "whitey", "blacky");
+  return p;
 }
 
 function lease(stack: AccessStack, seat: Seat): ControlLeaseId {
@@ -117,12 +125,13 @@ describe("TST-GACC-EDGE seat control over the real edge (production resolver, re
 
   it("TST-GACC-EDGE-002 a command without control is never admitted: only a read-only lookup, no stamp, clock, sequence, or binding", async () => {
     await withStack({}, async (stack) => {
-      const p = await players(stack);
+      const p = await started(stack);
       const white = await socketOf(stack, p.whiteCookie);
       await white.sync(GAME_ID);
       const before = await storedState(stack.ga.runtime);
+      const startCommits = stack.ga.runtime.repository.commits;
       stack.ga.runtime.clock.advance(7_000);
-      white.send(moveMessage("mv-1", "w-1", 0, "e2e4"));
+      white.send(moveMessage("mv-1", "w-1", 1, "e2e4"));
       expect(await failure(white)).toEqual({
         type: "request_failed",
         requestId: "mv-1",
@@ -135,10 +144,10 @@ describe("TST-GACC-EDGE seat control over the real edge (production resolver, re
       expect(stack.ga.runtime.facts.count("command_replayed")).toBe(0);
       expect(stack.facts.count("command_refused_control")).toBe(1);
       expect(stack.facts.count("command_submitted")).toBe(0);
-      expect(stack.ga.runtime.repository.commits).toBe(0);
+      expect(stack.ga.runtime.repository.commits).toBe(startCommits);
       expect(await storedState(stack.ga.runtime)).toEqual(before);
       await claimGranted(white, "claim-1");
-      white.send(moveMessage("mv-2", "w-1", 0, "e2e4"));
+      white.send(moveMessage("mv-2", "w-1", 1, "e2e4"));
       expect(field(await response(white), "code")).toBe("Accepted");
       await white.close();
     });
@@ -146,19 +155,19 @@ describe("TST-GACC-EDGE seat control over the real edge (production resolver, re
 
   it("TST-GACC-EDGE-003 a second session syncs without control, takes it only by claiming; the first is told and refused", async () => {
     await withStack({}, async (stack) => {
-      const p = await players(stack);
+      const p = await started(stack);
       const a = await socketOf(stack, p.whiteCookie);
       await a.sync(GAME_ID);
       await claimGranted(a, "claim-a");
       const leaseA = lease(stack, "white");
-      a.send(moveMessage("mv-a1", "x", 0, "e2e4"));
+      a.send(moveMessage("mv-a1", "x", 1, "e2e4"));
       expect(field(await response(a), "code")).toBe("Accepted");
 
       const b = await socketOf(stack, await logIn(stack, "whitey"));
       const synced = field(await b.sync(GAME_ID), "snapshot");
       expect(field(synced, "controlHeld")).toBe(false);
-      expect(field(synced, "sequence")).toBe(1);
-      b.send(moveMessage("mv-b0", "early", 1, "d2d4"));
+      expect(field(synced, "sequence")).toBe(2);
+      b.send(moveMessage("mv-b0", "early", 2, "d2d4"));
       expect(field(await failure(b), "code")).toBe("CONTROL_NOT_HELD");
 
       await claimGranted(b, "claim-b");
@@ -173,29 +182,29 @@ describe("TST-GACC-EDGE seat control over the real edge (production resolver, re
       const black = await socketOf(stack, p.blackCookie);
       await black.sync(GAME_ID);
       await claimGranted(black, "claim-black");
-      black.send(moveMessage("mv-k1", "k1", 1, "e7e5"));
+      black.send(moveMessage("mv-k1", "k1", 2, "e7e5"));
       expect(field(await response(black), "code")).toBe("Accepted");
 
       const commits = stack.ga.runtime.repository.commits;
-      a.send(moveMessage("mv-a2", "y", 2, "g1f3"));
+      a.send(moveMessage("mv-a2", "y", 3, "g1f3"));
       expect(field(await failure(a), "code")).toBe("CONTROL_NOT_HELD");
       expect(stack.ga.runtime.facts.count("command_accepted")).toBe(2);
       expect(stack.ga.runtime.repository.commits).toBe(commits);
 
-      b.send(moveMessage("mv-b1", "y", 2, "g1f3"));
+      b.send(moveMessage("mv-b1", "y", 3, "g1f3"));
       expect(field(await response(b), "code")).toBe("Accepted");
-      expect((await storedState(stack.ga.runtime)).sequence).toBe(3);
+      expect((await storedState(stack.ga.runtime)).sequence).toBe(4);
       await Promise.all([a.close(), b.close(), black.close()]);
     });
   });
 
   it("TST-GACC-EDGE-004 replay after transfer on the same connection: the exact resend gets the stored answer; an altered one is an identity conflict; a new one is refused; nothing changes", async () => {
     await withStack({}, async (stack) => {
-      const p = await players(stack);
+      const p = await started(stack);
       const a = await socketOf(stack, p.whiteCookie);
       await a.sync(GAME_ID);
       await claimGranted(a, "claim-a");
-      a.send(moveMessage("mv-x", "X", 0, "e2e4"));
+      a.send(moveMessage("mv-x", "X", 1, "e2e4"));
       const original = await response(a);
       expect(field(original, "code")).toBe("Accepted");
 
@@ -208,10 +217,10 @@ describe("TST-GACC-EDGE seat control over the real edge (production resolver, re
       const wakes = stack.ga.runtime.scheduler.pending().length;
       stack.ga.runtime.clock.advance(6_000);
 
-      a.send(moveMessage("mv-x-again", "X", 0, "e2e4"));
+      a.send(moveMessage("mv-x-again", "X", 1, "e2e4"));
       const replayed = await response(a);
       expectReplayOf(original, replayed);
-      a.send(moveMessage("mv-x-altered", "X", 0, "d2d4"));
+      a.send(moveMessage("mv-x-altered", "X", 1, "d2d4"));
       expect(await failure(a)).toEqual({
         type: "request_failed",
         requestId: "mv-x-altered",
@@ -219,7 +228,7 @@ describe("TST-GACC-EDGE seat control over the real edge (production resolver, re
         retryable: false,
         clientCommandId: "X",
       });
-      a.send(moveMessage("mv-y", "Y", 1, "d2d4"));
+      a.send(moveMessage("mv-y", "Y", 2, "d2d4"));
       expect(field(await failure(a), "code")).toBe("CONTROL_NOT_HELD");
       expect(stack.ga.runtime.repository.commits).toBe(commits);
       expect(await storedState(stack.ga.runtime)).toEqual(before);
@@ -232,12 +241,12 @@ describe("TST-GACC-EDGE seat control over the real edge (production resolver, re
       const black = await socketOf(stack, p.blackCookie);
       await black.sync(GAME_ID);
       await claimGranted(black, "claim-k");
-      black.send(moveMessage("mv-k", "K", 1, "e7e5"));
+      black.send(moveMessage("mv-k", "K", 2, "e7e5"));
       expect(field(await response(black), "code")).toBe("Accepted");
-      b.send(moveMessage("mv-b-y", "Y", 2, "g1f3"));
+      b.send(moveMessage("mv-b-y", "Y", 3, "g1f3"));
       expect(field(await response(b), "code")).toBe("Accepted");
       const state = await storedState(stack.ga.runtime);
-      expect(state.sequence).toBe(3);
+      expect(state.sequence).toBe(4);
       expect(state.commandBindings.map((binding) => binding.clientCommandId)).toEqual([
         "X",
         "K",
@@ -249,10 +258,10 @@ describe("TST-GACC-EDGE seat control over the real edge (production resolver, re
 
   it("TST-GACC-EDGE-010 replay survives the connection: the same session reconnects and gets the stored answer without control", async () => {
     await withStack({}, async (stack) => {
-      const p = await players(stack);
+      const p = await started(stack);
       const a = await socketOf(stack, p.whiteCookie);
       await claimGranted(a, "claim-a");
-      a.send(moveMessage("mv-x", "X", 0, "e2e4"));
+      a.send(moveMessage("mv-x", "X", 1, "e2e4"));
       const original = await response(a);
       const b = await socketOf(stack, await logIn(stack, "whitey"));
       await claimGranted(b, "claim-b");
@@ -261,11 +270,11 @@ describe("TST-GACC-EDGE seat control over the real edge (production resolver, re
       const commits = stack.ga.runtime.repository.commits;
 
       const again = await socketOf(stack, p.whiteCookie);
-      again.send(moveMessage("mv-x-again", "X", 0, "e2e4"));
+      again.send(moveMessage("mv-x-again", "X", 1, "e2e4"));
       expectReplayOf(original, await response(again));
-      again.send(moveMessage("mv-x-altered", "X", 0, "e2e3"));
+      again.send(moveMessage("mv-x-altered", "X", 1, "e2e3"));
       expect(field(await failure(again), "code")).toBe("INVALID_COMMAND_IDENTITY");
-      again.send(moveMessage("mv-y", "Y", 1, "d2d4"));
+      again.send(moveMessage("mv-y", "Y", 2, "d2d4"));
       expect(field(await failure(again), "code")).toBe("CONTROL_NOT_HELD");
       expect(field(await again.sync(GAME_ID), "snapshot", "controlHeld")).toBe(false);
       expect(stack.ga.runtime.repository.commits).toBe(commits);
@@ -283,10 +292,10 @@ describe("TST-GACC-EDGE seat control over the real edge (production resolver, re
 
   it("TST-GACC-EDGE-011 a new session of the same user replays the seat's bound commands, and gains no command authority", async () => {
     await withStack({}, async (stack) => {
-      const p = await players(stack);
+      const p = await started(stack);
       const a = await socketOf(stack, p.whiteCookie);
       await claimGranted(a, "claim-a");
-      a.send(moveMessage("mv-x", "X", 0, "e2e4"));
+      a.send(moveMessage("mv-x", "X", 1, "e2e4"));
       const original = await response(a);
       const b = await socketOf(stack, await logIn(stack, "whitey"));
       await claimGranted(b, "claim-b");
@@ -299,9 +308,9 @@ describe("TST-GACC-EDGE seat control over the real edge (production resolver, re
       const before = await storedState(stack.ga.runtime);
       const control = memoryOf(stack.ga).control(GAME_ID, "white");
       expect(control?.controllingSessionId).not.toBeNull();
-      c.send(moveMessage("mv-x-c", "X", 0, "e2e4"));
+      c.send(moveMessage("mv-x-c", "X", 1, "e2e4"));
       expectReplayOf(original, await response(c));
-      c.send(moveMessage("mv-y-c", "Y", 1, "d2d4"));
+      c.send(moveMessage("mv-y-c", "Y", 2, "d2d4"));
       expect(field(await failure(c), "code")).toBe("CONTROL_NOT_HELD");
       expect(await storedState(stack.ga.runtime)).toEqual(before);
       expect(memoryOf(stack.ga).control(GAME_ID, "white")).toEqual(control);
@@ -312,17 +321,17 @@ describe("TST-GACC-EDGE seat control over the real edge (production resolver, re
 
   it("TST-GACC-EDGE-012 the opponent and a third user never read a seat's stored answers", async () => {
     await withStack({}, async (stack) => {
-      const p = await players(stack);
+      const p = await started(stack);
       const white = await socketOf(stack, p.whiteCookie);
       await claimGranted(white, "claim-w");
-      white.send(moveMessage("mv-x", "X", 0, "e2e4"));
+      white.send(moveMessage("mv-x", "X", 1, "e2e4"));
       const original = await response(white);
       await signUp(stack, "Mallory");
       const mallory = await socketOf(stack, await logIn(stack, "mallory"));
       const black = await socketOf(stack, p.blackCookie);
       const before = await storedState(stack.ga.runtime);
 
-      black.send(moveMessage("mv-x-black", "X", 0, "e2e4"));
+      black.send(moveMessage("mv-x-black", "X", 1, "e2e4"));
       expect(await failure(black)).toEqual({
         type: "request_failed",
         requestId: "mv-x-black",
@@ -331,9 +340,9 @@ describe("TST-GACC-EDGE seat control over the real edge (production resolver, re
         clientCommandId: "X",
       });
       const otherSession = await socketOf(stack, await logIn(stack, "blacky"));
-      otherSession.send(moveMessage("mv-x-black-2", "X", 0, "e2e4"));
+      otherSession.send(moveMessage("mv-x-black-2", "X", 1, "e2e4"));
       expect(field(await failure(otherSession), "code")).toBe("CONTROL_NOT_HELD");
-      mallory.send(moveMessage("mv-x-mallory", "X", 0, "e2e4"));
+      mallory.send(moveMessage("mv-x-mallory", "X", 1, "e2e4"));
       expect(await failure(mallory)).toEqual({
         type: "request_failed",
         requestId: "mv-x-mallory",
@@ -354,10 +363,10 @@ describe("TST-GACC-EDGE seat control over the real edge (production resolver, re
 
   it("TST-GACC-EDGE-013 the current controller replays a command bound under a former lease and an altered one is INVALID_COMMAND_IDENTITY, both never received; a new one plays (GACC-016)", async () => {
     await withStack({}, async (stack) => {
-      const p = await players(stack);
+      const p = await started(stack);
       const a = await socketOf(stack, p.whiteCookie);
       await claimGranted(a, "claim-a");
-      a.send(moveMessage("mv-x", "X", 0, "e2e4"));
+      a.send(moveMessage("mv-x", "X", 1, "e2e4"));
       const original = await response(a);
       const b = await socketOf(stack, await logIn(stack, "whitey"));
       await claimGranted(b, "claim-b");
@@ -370,9 +379,9 @@ describe("TST-GACC-EDGE seat control over the real edge (production resolver, re
       stack.ga.runtime.clock.advance(3_000);
       const reads = stack.ga.runtime.clock.reads;
 
-      b.send(moveMessage("mv-x-b", "X", 0, "e2e4"));
+      b.send(moveMessage("mv-x-b", "X", 1, "e2e4"));
       expectReplayOf(original, await response(b));
-      b.send(moveMessage("mv-x-b-altered", "X", 0, "d2d4"));
+      b.send(moveMessage("mv-x-b-altered", "X", 1, "d2d4"));
       expect(await failure(b)).toEqual({
         type: "request_failed",
         requestId: "mv-x-b-altered",
@@ -395,13 +404,13 @@ describe("TST-GACC-EDGE seat control over the real edge (production resolver, re
 
       const black = await socketOf(stack, p.blackCookie);
       await claimGranted(black, "claim-k");
-      black.send(moveMessage("mv-k", "K", 1, "e7e5"));
+      black.send(moveMessage("mv-k", "K", 2, "e7e5"));
       expect(field(await response(black), "code")).toBe("Accepted");
-      b.send(moveMessage("mv-y-b", "Y", 2, "g1f3"));
+      b.send(moveMessage("mv-y-b", "Y", 3, "g1f3"));
       const played = await response(b);
       expect([field(played, "code"), field(played, "replayed")]).toEqual(["Accepted", false]);
       const after = await storedState(stack.ga.runtime);
-      expect(after.sequence).toBe(3);
+      expect(after.sequence).toBe(4);
       expect(after.commandBindings.map((binding) => binding.clientCommandId)).toEqual([
         "X",
         "K",
@@ -413,7 +422,7 @@ describe("TST-GACC-EDGE seat control over the real edge (production resolver, re
 
   it("TST-GACC-EDGE-005 the old lease is refused by the writer even when the revocation notice never arrives", async () => {
     await withStack({}, async (stack) => {
-      const p = await players(stack);
+      const p = await started(stack);
       const a = await socketOf(stack, p.whiteCookie);
       await a.sync(GAME_ID);
       await claimGranted(a, "claim-a");
@@ -436,15 +445,15 @@ describe("TST-GACC-EDGE seat control over the real edge (production resolver, re
       writer.applyControlLease("white", takenLease, applied.resolve);
       expect(await applied.promise).toEqual({ kind: "applied" });
 
-      a.send(moveMessage("mv-1", "w-1", 0, "e2e4"));
+      a.send(moveMessage("mv-1", "w-1", 1, "e2e4"));
       expect(field(await failure(a), "code")).toBe("CONTROL_NOT_HELD");
       expect(stack.ga.runtime.facts.count("command_refused_control")).toBe(2);
-      a.send(moveMessage("mv-2", "w-1", 0, "e2e4"));
+      a.send(moveMessage("mv-2", "w-1", 1, "e2e4"));
       expect(field(await failure(a), "code")).toBe("CONTROL_NOT_HELD");
       expect(stack.ga.runtime.facts.count("command_refused_control")).toBe(3);
       expect(stack.ga.runtime.facts.count("command_replayed")).toBe(0);
       expect(field(await a.sync(GAME_ID, "sync-2"), "snapshot", "controlHeld")).toBe(false);
-      expect((await storedState(stack.ga.runtime)).sequence).toBe(0);
+      expect((await storedState(stack.ga.runtime)).sequence).toBe(1);
       expect(a.unread("control_revoked")).toEqual([]);
       await a.close();
     });
@@ -522,7 +531,8 @@ describe("TST-GACC-EDGE seat control over the real edge (production resolver, re
       expect(memoryOf(stack.ga).control(GAME_ID, "white")?.controllingSessionId).toBeNull();
       expect(memoryOf(stack.ga).control(GAME_ID, "black")?.controllingSessionId).not.toBeNull();
       const state = await storedState(stack.ga.runtime);
-      expect(state.status.kind).toBe("active");
+      expect(state.status.kind).toBe("awaiting_players");
+      expect(state.sequence).toBe(0);
       expect(
         await openClient(stack.ws, { token: null, headers: { cookie: p.whiteCookie } }),
       ).toMatchObject({ kind: "refused", status: 401 });
@@ -536,7 +546,7 @@ describe("TST-GACC-EDGE seat control over the real edge (production resolver, re
     await withStack(
       { accessLimits: { claimBurst: 2, claimRefillEveryMs: 60_000 } },
       async (stack) => {
-        const p = await players(stack);
+        const p = await started(stack);
         const white = await socketOf(stack, p.whiteCookie);
         await white.sync(GAME_ID);
         await claimGranted(white, "c-1");
@@ -555,7 +565,7 @@ describe("TST-GACC-EDGE seat control over the real edge (production resolver, re
             contractVersion: "1",
             gameId: GAME_ID,
             clientCommandId: "resign-1",
-            expectedGameSequence: 0,
+            expectedGameSequence: 1,
           },
         });
         expect(field(await response(white), "code")).toBe("Accepted");

@@ -12,15 +12,18 @@ import type { AccountStatus, UserId } from "@chess-one/identity";
 import {
   type ControlDirectory,
   type GameId,
+  type GameLifecycle,
   isPlayerId,
   type PlayerId,
 } from "@chess-one/live-game-runtime";
 import {
   type AssignedGame,
+  type AssignedGameCheck,
   type AssignedGameError,
   type AssignedGameRequest,
   type AssignmentDeps,
   type AssignmentPolicy,
+  checkAssignedGame,
   createAssignedGame,
   DEFAULT_ASSIGNMENT_POLICY,
   type ReconciliationOutcome,
@@ -30,9 +33,11 @@ import { GameControlService } from "./control.ts";
 import type { GameAccessFactSink } from "./facts.ts";
 import { type GameAccessStore, GameAccessStoreError } from "./ports.ts";
 import { ProductionGameAccessResolver } from "./resolver.ts";
+import { KeyedSerializer } from "./serializer.ts";
 import type { GameAccessProvider, SessionGameAuthority } from "./session-authority.ts";
 import type { AccessResolution, ClaimDecision, SeatListing } from "./values.ts";
 import { ControlWatchers } from "./watchers.ts";
+import { gameLifecycle } from "./writer-lease.ts";
 
 export interface GameAccessLimits {
   /** Seats listed in `connection_ready`, newest first. */
@@ -99,6 +104,7 @@ export class GameAccess implements GameAccessProvider {
   readonly #control: GameControlService;
   readonly #claims: AttemptLimiter;
   readonly #assignments: AssignmentDeps;
+  readonly #assigning = new KeyedSerializer<GameId>();
   readonly #unlisten: () => void;
 
   constructor(config: GameAccessConfig) {
@@ -158,15 +164,32 @@ export class GameAccess implements GameAccessProvider {
     return this.#control.pendingRevocations;
   }
 
-  /** The trusted internal creation of an assigned game (no public endpoint). */
+  /**
+   * The trusted internal creation of an assigned game (no public endpoint).
+   * Creation, reconciliation, and checks of one game id run one at a time in
+   * this process, so a check never discards the pending assignment of a
+   * creation still in flight.
+   */
   createAssignedGame(
     request: AssignedGameRequest,
   ): Promise<Outcome<AssignedGame, AssignedGameError>> {
-    return createAssignedGame(this.#assignments, request);
+    return this.#assigning.run(request.gameId, () =>
+      createAssignedGame(this.#assignments, request),
+    );
   }
 
   reconcileAssignment(gameId: GameId): Promise<ReconciliationOutcome> {
-    return reconcileAssignment(this.#assignments, gameId);
+    return this.#assigning.run(gameId, () => reconcileAssignment(this.#assignments, gameId));
+  }
+
+  /** Reconciles, then compares the stored game with `request`; creates nothing. */
+  checkAssignedGame(request: AssignedGameRequest): Promise<AssignedGameCheck> {
+    return this.#assigning.run(request.gameId, () => checkAssignedGame(this.#assignments, request));
+  }
+
+  /** The game's lifecycle as its writer reads it now (an overdue awaiting game is aborted first). */
+  gameLifecycle(gameId: GameId): Promise<GameLifecycle | "paused" | "unavailable"> {
+    return gameLifecycle(this.#assignments.writers, gameId);
   }
 
   resolve(playerId: PlayerId, gameId: GameId): Promise<AccessResolution> {
@@ -194,6 +217,7 @@ export class GameAccess implements GameAccessProvider {
         return control.claim(session, playerId, gameId);
       },
       replayAccess: (gameId) => control.replayAccess(session, playerId, gameId),
+      ready: (gameId, presence) => control.ready(session, playerId, gameId, presence),
       watchControl: (gameId, seat, onChange) =>
         this.#watchers.watch(gameId, seat, session.sessionId, onChange) ?? NO_WATCH,
       sessionEnded: () => {

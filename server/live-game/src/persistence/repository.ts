@@ -1,5 +1,6 @@
 import type { GameSequence, Result } from "@chess-one/game-values";
 import type { ActiveGameState, CommandBinding } from "../active-game.ts";
+import type { WallClockMs } from "../clock.ts";
 import type { GameFinishedV1 } from "../events.ts";
 import type { GameId } from "../ids.ts";
 import type { CorruptState } from "./state-codec.ts";
@@ -112,6 +113,18 @@ export interface LiveGameRepository {
   ): Promise<Result<CommitReceipt, CommitError>>;
 }
 
+/**
+ * Finds games still awaiting their players whose start deadline is at or
+ * before `now` (UTC wall time), earliest deadline first, at most `limit`.
+ * Read only: each abort is decided and written by the game's writer.
+ */
+export interface AwaitingGameIndex {
+  dueAwaitingGames(
+    now: WallClockMs,
+    limit: number,
+  ): Promise<Result<readonly GameId[], PersistenceFailure>>;
+}
+
 function planDefect(message: string): never {
   throw new Error(`Live game persistence defect: ${message}`);
 }
@@ -120,13 +133,38 @@ function planDefect(message: string): never {
 function unchangedExcept(
   previous: ActiveGameState,
   next: ActiveGameState,
-  field: "commandBindings" | "controlLeases",
+  ...fields: readonly (keyof ActiveGameState)[]
 ): boolean {
   const before = new Map(Object.entries(previous));
   const after = new Map(Object.entries(next));
   const names = new Set([...before.keys(), ...after.keys()]);
-  names.delete(field);
+  for (const field of fields) names.delete(field);
   return [...names].every((name) => before.get(name) === after.get(name));
+}
+
+/**
+ * A game leaves `awaiting_players` only by its start or its abort, which
+ * change the status, the clock, and the sequence and nothing else; no
+ * transition ever returns a game to it.
+ */
+function checkLifecycle(
+  previous: ActiveGameState,
+  next: ActiveGameState,
+  binding: CommandBinding | null,
+  events: readonly GameFinishedV1[],
+): void {
+  if (next.status.kind === "awaiting_players") planDefect("a transition into awaiting_players");
+  if (previous.status.kind !== "awaiting_players") {
+    if (next.status.kind === "aborted_before_start") planDefect("an abort after the start");
+    return;
+  }
+  if (next.status.kind !== "active" && next.status.kind !== "aborted_before_start") {
+    planDefect("an awaiting game only starts or aborts");
+  }
+  if (binding !== null || events.length > 0) planDefect("a start or abort binds or emits");
+  if (!unchangedExcept(previous, next, "status", "clock", "sequence")) {
+    planDefect("a start or abort changed more than the status and the clock");
+  }
 }
 
 /** The game's identity is stored once and never rewritten by a transition. */
@@ -184,6 +222,7 @@ export function planCommit(
   if (events.some((event) => event.gameSequence !== next.sequence)) {
     planDefect("an event of another sequence");
   }
+  checkLifecycle(previous, next, binding, events);
   return {
     kind: "transition",
     ...common,

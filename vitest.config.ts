@@ -37,6 +37,14 @@ export default defineConfig({
           testTimeout: 20_000,
         },
       },
+      {
+        test: {
+          name: "challenges",
+          include: ["tests/challenges/**/*.test.ts"],
+          exclude: [...configDefaults.exclude, "tests/challenges/**/*.db.test.ts"],
+          testTimeout: 20_000,
+        },
+      },
     ],
   },
 });

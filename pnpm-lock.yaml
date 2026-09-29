@@ -182,6 +182,15 @@ importers:
         specifier: 5.0.2
         version: 5.0.2(@types/node@24.19.0)(vite@8.3.1(@types/node@24.19.0))
 
+  domain/challenges:
+    dependencies:
+      '@chess-one/chess-rules':
+        specifier: workspace:*
+        version: link:../chess-rules
+      '@chess-one/identity':
+        specifier: workspace:*
+        version: link:../identity
+
   domain/chess-rules:
     dependencies:
       '@chess-one/game-values':
@@ -217,11 +226,48 @@ importers:
         specifier: 8.23.1
         version: 8.23.1
 
+  server/challenges:
+    dependencies:
+      '@chess-one/accounts':
+        specifier: workspace:*
+        version: link:../accounts
+      '@chess-one/challenge-domain':
+        specifier: workspace:*
+        version: link:../../domain/challenges
+      '@chess-one/identity':
+        specifier: workspace:*
+        version: link:../../domain/identity
+
+  server/challenges-persistence:
+    dependencies:
+      '@chess-one/challenge-domain':
+        specifier: workspace:*
+        version: link:../../domain/challenges
+      '@chess-one/challenges':
+        specifier: workspace:*
+        version: link:../challenges
+      '@chess-one/identity':
+        specifier: workspace:*
+        version: link:../../domain/identity
+      kysely:
+        specifier: 0.29.6
+        version: 0.29.6
+      pg:
+        specifier: 8.23.0
+        version: 8.23.0
+    devDependencies:
+      '@types/pg':
+        specifier: 8.23.1
+        version: 8.23.1
+
   server/edge:
     dependencies:
       '@chess-one/accounts':
         specifier: workspace:*
         version: link:../accounts
+      '@chess-one/challenges':
+        specifier: workspace:*
+        version: link:../challenges
       '@chess-one/game-access':
         specifier: workspace:*
         version: link:../game-access
@@ -359,6 +405,45 @@ importers:
         version: 8.22.0
 
   tests/boundaries: {}
+
+  tests/challenges:
+    devDependencies:
+      '@chess-one/accounts':
+        specifier: workspace:*
+        version: link:../../server/accounts
+      '@chess-one/accounts-persistence':
+        specifier: workspace:*
+        version: link:../../server/accounts-persistence
+      '@chess-one/challenge-domain':
+        specifier: workspace:*
+        version: link:../../domain/challenges
+      '@chess-one/challenges':
+        specifier: workspace:*
+        version: link:../../server/challenges
+      '@chess-one/challenges-persistence':
+        specifier: workspace:*
+        version: link:../../server/challenges-persistence
+      '@chess-one/chess-rules':
+        specifier: workspace:*
+        version: link:../../domain/chess-rules
+      '@chess-one/edge':
+        specifier: workspace:*
+        version: link:../../server/edge
+      '@chess-one/identity':
+        specifier: workspace:*
+        version: link:../../domain/identity
+      '@chess-one/live-game-persistence':
+        specifier: workspace:*
+        version: link:../../server/live-game-persistence
+      '@chess-one/live-game-runtime':
+        specifier: workspace:*
+        version: link:../../server/live-game-runtime
+      kysely:
+        specifier: 0.29.6
+        version: 0.29.6
+      pg:
+        specifier: 8.23.0
+        version: 8.23.0
 
   tests/game-access:
     devDependencies:

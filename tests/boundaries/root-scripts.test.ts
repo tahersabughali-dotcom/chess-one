@@ -43,6 +43,9 @@ describe("TST-BOUNDARY root scripts", () => {
       "server/accounts",
       "server/accounts-persistence",
       "server/edge",
+      "domain/challenges",
+      "server/challenges",
+      "server/challenges-persistence",
     ]) {
       expect(typecheck, project).toContain(`tsc -p ${project}`);
     }
@@ -110,6 +113,27 @@ describe("TST-BOUNDARY database integration wiring", () => {
       expect(read(suite), suite).not.toMatch(/\.(skip|todo|only)\b|skipIf|runIf/);
     }
     expect(read("../accounts/support/db.ts")).toContain("testDatabaseUrl");
+  });
+
+  it("TST-BOUNDARY-051 challenge tests run in test (local), test:db (PostgreSQL), and test:challenges (all); none can skip", () => {
+    expect(script("test:challenges")).toBe("vitest run --config vitest.challenges.config.ts");
+    expect(script("check")).not.toContain("test:challenges");
+    const read = (path: string): string =>
+      readFileSync(fileURLToPath(new URL(path, import.meta.url)), "utf8");
+    expect(read("../../vitest.challenges.config.ts")).toContain(
+      'include: ["tests/challenges/**/*.test.ts"]',
+    );
+    expect(read("../../vitest.db.config.ts")).toContain('"tests/challenges/**/*.db.test.ts"');
+    for (const suite of [
+      "../challenges/domain.test.ts",
+      "../challenges/challenges.test.ts",
+      "../challenges/http.test.ts",
+      "../challenges/challenges.db.test.ts",
+      "../challenges/e2e.db.test.ts",
+    ]) {
+      expect(read(suite), suite).not.toMatch(/\.(skip|todo|only)\b|skipIf|runIf/);
+    }
+    expect(read("../challenges/support/db.ts")).toContain("withChallengesSchema");
   });
 });
 

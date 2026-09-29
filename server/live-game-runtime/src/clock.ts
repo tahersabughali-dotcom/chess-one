@@ -1,4 +1,4 @@
-import type { ClockDomainId, MonotonicMs } from "@chess-one/live-game";
+import type { ClockDomainId, MonotonicMs, WallClockMs } from "@chess-one/live-game";
 
 /**
  * DEC-061, DEC-063: the writer's monotonic clock, in whole milliseconds. It is
@@ -16,6 +16,15 @@ export interface MonotonicClock {
 export interface ClockDomain {
   readonly id: ClockDomainId;
   readonly clock: MonotonicClock;
+}
+
+/**
+ * The server's UTC wall clock. Its one use in the runtime is the start
+ * deadline of a game awaiting its players; no chess clock, receipt, or flag
+ * ever reads it.
+ */
+export interface WallClock {
+  now(): WallClockMs;
 }
 
 export interface WakeHandle {

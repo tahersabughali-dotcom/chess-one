@@ -1,16 +1,18 @@
 import type { ControlNotice } from "@chess-one/game-access";
 import { type AccountStatus, isUserId } from "@chess-one/identity";
-import type { ControlLeaseId, Seat } from "@chess-one/live-game-runtime";
+import { type ControlLeaseId, type Seat, suddenDeath } from "@chess-one/live-game-runtime";
 import { describe, expect, it } from "vitest";
 import { CLIENT, DAY, registered, signedIn } from "../accounts/support/harness.ts";
 import {
   GAME_ID,
+  INITIAL_MS,
   newGame,
   OTHER_GAME_ID,
   resignCommand,
   STRANGER,
 } from "../live-game/support/harness.ts";
 import { store, storedState, writerOf } from "../realtime/support/runtime.ts";
+import { ManualWallTime, wallMs } from "../realtime/support/time.ts";
 import {
   assignedGame,
   type GameAccessHarness,
@@ -20,6 +22,8 @@ import {
   memoryOf,
   playerOf,
   sessionOf,
+  startDeadlineFrom,
+  startedGame,
   TIME_CONTROL,
 } from "./support/harness.ts";
 
@@ -182,7 +186,7 @@ describe("TST-GACC-SVC game access and seat control (in-memory store, real accou
       kind: "refused",
       reason: "session_ended",
     });
-    const lease = await grantedLease(white.authority);
+    const { white: lease } = await startedGame({ white, black, gameId: GAME_ID });
     const state = await storedState(h.runtime);
     const resigned = Promise.withResolvers<unknown>();
     writerOf(h.runtime).submitCommand(
@@ -192,11 +196,14 @@ describe("TST-GACC-SVC game access and seat control (in-memory store, real accou
     );
     await resigned.promise;
     expect((await storedState(h.runtime)).status.kind).not.toBe("active");
-    expect(await black.authority.claim(GAME_ID)).toEqual({
+    const held = control(h, "black");
+    const blackAgain = sessionOf(h, await signedIn(h.accounts, "Bob"));
+    expect(await blackAgain.authority.claim(GAME_ID)).toEqual({
       kind: "refused",
       reason: "game_closed",
     });
-    expect(control(h, "black").controllingSessionId).toBeNull();
+    expect(control(h, "black")).toEqual(held);
+    expect(held.controllingSessionId).toBe(black.signedIn.session.sessionId);
   });
 
   it("TST-GACC-SVC-007 an expired session cannot claim", async () => {
@@ -303,6 +310,7 @@ describe("TST-GACC-SVC game access and seat control (in-memory store, real accou
       white: black.signedIn.account.userId,
       black: white.signedIn.account.userId,
       timeControl: TIME_CONTROL,
+      startDeadlineAtWallMs: startDeadlineFrom(h.runtime),
     });
     const second = sessionOf(h, await signedIn(h.accounts, "Alice"));
     await grantedLease(white.authority, GAME_ID);
@@ -498,6 +506,7 @@ describe("TST-GACC-ASSIGN trusted creation of an assigned game", () => {
       white: white.account.userId,
       black: black.account.userId,
       timeControl: TIME_CONTROL,
+      startDeadlineAtWallMs: startDeadlineFrom(h.runtime),
     });
     expect(created.ok).toBe(true);
     const assignment = await h.store.findAssignment(GAME_ID);
@@ -521,7 +530,11 @@ describe("TST-GACC-ASSIGN trusted creation of an assigned game", () => {
     const alice = await registered(h.accounts, "Alice");
     const bob = await registered(h.accounts, "Bob");
     const carol = await registered(h.accounts, "Carol");
-    const request = { gameId: GAME_ID, timeControl: TIME_CONTROL };
+    const request = {
+      gameId: GAME_ID,
+      timeControl: TIME_CONTROL,
+      startDeadlineAtWallMs: startDeadlineFrom(h.runtime),
+    };
     expect(
       await h.access.createAssignedGame({
         ...request,
@@ -575,6 +588,7 @@ describe("TST-GACC-ASSIGN trusted creation of an assigned game", () => {
         white: a.account.userId,
         black: b.account.userId,
         timeControl: TIME_CONTROL,
+        startDeadlineAtWallMs: startDeadlineFrom(strict.runtime),
       }),
     ).toEqual({ ok: false, error: { kind: "email_not_verified", seat: "white" } });
     const relaxed = gameAccessHarness();
@@ -592,6 +606,7 @@ describe("TST-GACC-ASSIGN trusted creation of an assigned game", () => {
       white: white.account.userId,
       black: black.account.userId,
       timeControl: TIME_CONTROL,
+      startDeadlineAtWallMs: startDeadlineFrom(h.runtime),
     });
     expect(created).toEqual({ ok: false, error: { kind: "unavailable" } });
     expect(await h.store.findAssignment(GAME_ID)).toBeNull();
@@ -609,6 +624,7 @@ describe("TST-GACC-ASSIGN trusted creation of an assigned game", () => {
       white: white.account.userId,
       black: black.account.userId,
       timeControl: TIME_CONTROL,
+      startDeadlineAtWallMs: startDeadlineFrom(h.runtime),
     });
     expect(created).toEqual({
       ok: false,
@@ -629,6 +645,7 @@ describe("TST-GACC-ASSIGN trusted creation of an assigned game", () => {
       white: white.account.userId,
       black: black.account.userId,
       timeControl: TIME_CONTROL,
+      startDeadlineAtWallMs: startDeadlineFrom(h.runtime),
     });
     expect(created).toEqual({
       ok: false,
@@ -658,6 +675,7 @@ describe("TST-GACC-ASSIGN trusted creation of an assigned game", () => {
       white: white.account.userId,
       black: black.account.userId,
       timeControl: TIME_CONTROL,
+      startDeadlineAtWallMs: startDeadlineFrom(h.runtime),
     });
     expect(created).toEqual({
       ok: false,
@@ -679,6 +697,7 @@ describe("TST-GACC-ASSIGN trusted creation of an assigned game", () => {
       white: white.account.userId,
       black: black.account.userId,
       timeControl: TIME_CONTROL,
+      startDeadlineAtWallMs: startDeadlineFrom(h.runtime),
     };
     memoryOf(h).failNext("reserveAssignment", "unavailable");
     expect(await h.access.createAssignedGame(request)).toEqual({
@@ -702,6 +721,7 @@ describe("TST-GACC-ASSIGN trusted creation of an assigned game", () => {
       white: white.account.userId,
       black: black.account.userId,
       timeControl: TIME_CONTROL,
+      startDeadlineAtWallMs: startDeadlineFrom(h.runtime),
     });
     expect(created).toEqual({
       ok: false,
@@ -711,5 +731,119 @@ describe("TST-GACC-ASSIGN trusted creation of an assigned game", () => {
     expect(await h.access.resolve(playerOf(white), GAME_ID)).toBe("game_not_found");
     expect((await storedState(h.runtime)).players.white).not.toBe(playerOf(white));
     expect(await memoryOf(h).discardPendingAssignment(GAME_ID)).toBe(false);
+  });
+
+  it("TST-GACC-ASSIGN-010 the check compares the seats, the initial time, and the start deadline while the game records it, in any lifecycle", async () => {
+    const h = gameAccessHarness();
+    const white = await registered(h.accounts, "Alice");
+    const black = await registered(h.accounts, "Bob");
+    const deadline = startDeadlineFrom(h.runtime);
+    const request = {
+      gameId: GAME_ID,
+      white: white.account.userId,
+      black: black.account.userId,
+      timeControl: TIME_CONTROL,
+      startDeadlineAtWallMs: deadline,
+    };
+    expect(await h.access.checkAssignedGame(request)).toBe("absent");
+    expect((await h.access.createAssignedGame(request)).ok).toBe(true);
+    expect(await h.access.checkAssignedGame(request)).toBe("matches");
+    const longer = suddenDeath(INITIAL_MS + 60_000);
+    if (longer === null) throw new Error("time control expected");
+    const lateDeadline = { ...request, startDeadlineAtWallMs: wallMs(deadline + 1) };
+    const variants: [string, typeof request][] = [
+      ["seats swapped", { ...request, white: request.black, black: request.white }],
+      ["start deadline", lateDeadline],
+      ["initial time", { ...request, timeControl: longer }],
+    ];
+    for (const [name, variant] of variants) {
+      expect(await h.access.checkAssignedGame(variant), name).toBe("mismatch");
+    }
+    await startedGame({
+      white: sessionOf(h, white),
+      black: sessionOf(h, black),
+      gameId: GAME_ID,
+    });
+    expect(await h.access.gameLifecycle(GAME_ID)).toBe("in_progress");
+    expect(await h.access.checkAssignedGame(request)).toBe("matches");
+    expect(await h.access.checkAssignedGame(lateDeadline)).toBe("matches");
+
+    const aborted = gameAccessHarness();
+    const a = await registered(aborted.accounts, "Alice");
+    const b = await registered(aborted.accounts, "Bob");
+    const abortedDeadline = startDeadlineFrom(aborted.runtime);
+    const abortedRequest = {
+      ...request,
+      white: a.account.userId,
+      black: b.account.userId,
+      startDeadlineAtWallMs: abortedDeadline,
+    };
+    expect((await aborted.access.createAssignedGame(abortedRequest)).ok).toBe(true);
+    const wall = aborted.runtime.wallClock;
+    if (!(wall instanceof ManualWallTime)) throw new Error("manual wall time expected");
+    wall.set(abortedDeadline);
+    expect(await aborted.access.gameLifecycle(GAME_ID)).toBe("aborted_before_start");
+    expect(await aborted.access.checkAssignedGame(abortedRequest)).toBe("matches");
+    expect(
+      await aborted.access.checkAssignedGame({
+        ...abortedRequest,
+        startDeadlineAtWallMs: wallMs(abortedDeadline - 1),
+      }),
+    ).toBe("mismatch");
+    expect([...h.defects.errors, ...aborted.defects.errors]).toEqual([]);
+  });
+
+  it("TST-GACC-ASSIGN-011 a live game stored under the id with no assignment is a mismatch, never absent, and the check assigns nothing", async () => {
+    const h = gameAccessHarness();
+    await store(h.runtime, newGame());
+    const white = await registered(h.accounts, "Alice");
+    const black = await registered(h.accounts, "Bob");
+    const request = {
+      gameId: GAME_ID,
+      white: white.account.userId,
+      black: black.account.userId,
+      timeControl: TIME_CONTROL,
+      startDeadlineAtWallMs: startDeadlineFrom(h.runtime),
+    };
+    expect(await h.access.checkAssignedGame(request)).toBe("mismatch");
+    expect(await h.store.findAssignment(GAME_ID)).toBeNull();
+    expect(await h.access.checkAssignedGame({ ...request, gameId: OTHER_GAME_ID })).toBe("absent");
+    h.runtime.repository.loadFault = true;
+    expect(await h.access.checkAssignedGame({ ...request, gameId: OTHER_GAME_ID })).toBe("unknown");
+  });
+
+  it("TST-GACC-ASSIGN-012 a check racing the creation of the same id waits for it: it never discards an assignment in flight", async () => {
+    const h = gameAccessHarness();
+    const white = await registered(h.accounts, "Alice");
+    const black = await registered(h.accounts, "Bob");
+    const request = {
+      gameId: GAME_ID,
+      white: white.account.userId,
+      black: black.account.userId,
+      timeControl: TIME_CONTROL,
+      startDeadlineAtWallMs: startDeadlineFrom(h.runtime),
+    };
+    const [created, checked, reconciled] = await Promise.all([
+      h.access.createAssignedGame(request),
+      h.access.checkAssignedGame(request),
+      h.access.reconcileAssignment(GAME_ID),
+    ]);
+    expect(created.ok).toBe(true);
+    expect(checked).toBe("matches");
+    expect(reconciled).toBe("confirmed");
+    expect((await h.store.findAssignment(GAME_ID))?.state).toBe("confirmed");
+    expect(await h.access.resolve(playerOf(white), GAME_ID)).toBe("player_white");
+    expect(h.facts.named("game_assignment_reconciled").map((fact) => fact.outcome)).not.toContain(
+      "discarded",
+    );
+
+    const other = { ...request, gameId: OTHER_GAME_ID };
+    const [checkedFirst, createdSecond] = await Promise.all([
+      h.access.checkAssignedGame(other),
+      h.access.createAssignedGame(other),
+    ]);
+    expect([checkedFirst, createdSecond.ok]).toEqual(["absent", true]);
+    expect(await h.access.checkAssignedGame(other)).toBe("matches");
+    expect(h.defects.errors).toEqual([]);
   });
 });

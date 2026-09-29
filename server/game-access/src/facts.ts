@@ -1,5 +1,5 @@
 import type { GameId, Seat } from "@chess-one/live-game-runtime";
-import type { ClaimRefusal, ControlRevocation } from "./values.ts";
+import type { ClaimRefusal, ControlRevocation, ReadyRefusal } from "./values.ts";
 
 export interface GameAccessFactSink {
   record(fact: GameAccessFact): void;
@@ -56,6 +56,12 @@ export type GameAccessFact =
       readonly reason: ControlRevocation;
     }
   | { readonly name: "game_control_conflict"; readonly gameId: GameId; readonly seat: Seat }
+  /** A ready request refused before or at the writer; codes only. */
+  | {
+      readonly name: "game_ready_denied";
+      readonly gameId: GameId;
+      readonly reason: ReadyRefusal | "unavailable";
+    }
   | {
       readonly name: "game_access_unavailable";
       readonly operation: "resolve" | "claim" | "revoke" | "assign" | "list";

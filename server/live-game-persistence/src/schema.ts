@@ -1,7 +1,7 @@
 import type { ColumnType } from "kysely";
 
 /**
- * Kysely view of the Batch 8 schema (migrations 001-003). `bigint` columns
+ * Kysely view of the live-game schema (migrations 001-004). `bigint` columns
  * are read as the strings pg returns and parsed strictly; `jsonb` columns are
  * written as JSON text and read as parsed, untrusted values. Timestamps are
  * database audit time only and are never read back into game state.

@@ -498,12 +498,13 @@ describe("TST-BOUNDARY realtime layers", () => {
       rulesFor(
         rt(
           "system.ts",
-          "const t = process.hrtime.bigint(); const id = crypto.randomUUID(); clearTimeout(setTimeout(() => undefined, 1));",
+          "const t = process.hrtime.bigint(); const id = crypto.randomUUID(); clearTimeout(setTimeout(() => undefined, 1)); const w = Date.now();",
         ),
       ),
     ).toEqual([]);
     for (const code of [
-      "const t = Date.now();",
+      "const t = new Date();",
+      "const t = performance.now();",
       "const e = process.env.X;",
       "const r = Math.random();",
     ]) {
@@ -832,6 +833,117 @@ describe("TST-BOUNDARY accounts layers", () => {
     expect(
       rulesFor(
         client('import { PostgresGameAccessStore } from "@chess-one/game-access-persistence";'),
+      ),
+    ).toContain("client_imports_persistence");
+  });
+});
+
+const chd = (name: string, content: string): SourceFile => ({
+  path: `domain/challenges/src/${name}`,
+  content,
+});
+const ch = (name: string, content: string): SourceFile => ({
+  path: `server/challenges/src/${name}`,
+  content,
+});
+const chStore = (name: string, content: string): SourceFile => ({
+  path: `server/challenges-persistence/src/${name}`,
+  content,
+});
+
+describe("TST-BOUNDARY challenge layers", () => {
+  it("TST-BOUNDARY-046 the challenge domain is pure: identity and the ruleset registry only; no clock, randomness, or environment", () => {
+    for (const code of [
+      'import { parseUsername } from "@chess-one/identity";',
+      'import { DEFAULT_RULESET_ID } from "@chess-one/chess-rules";',
+    ]) {
+      expect(rulesFor(chd("a.ts", code)), code).toEqual([]);
+    }
+    for (const code of [
+      'import Fastify from "fastify";',
+      'import { Kysely } from "kysely";',
+      'import { randomBytes } from "node:crypto";',
+      'import { Accounts } from "@chess-one/accounts";',
+      'import { startGame } from "@chess-one/live-game";',
+      'import { GameAccess } from "@chess-one/game-access";',
+      'import { Challenges } from "@chess-one/challenges";',
+    ]) {
+      expect(rulesFor(chd("a.ts", code)), code).not.toEqual([]);
+    }
+    for (const code of [
+      "const t = Date.now();",
+      "const d = new Date();",
+      "const r = Math.random();",
+      "const e = process.env.X;",
+    ]) {
+      expect(rulesFor(chd("a.ts", code)), code).toContain("ambient_access");
+    }
+  });
+
+  it("TST-BOUNDARY-047 the challenges application sees accounts, identity, its domain, and node:crypto only; no game, transport, or store", () => {
+    for (const code of [
+      'import type { PlayerDirectory } from "@chess-one/accounts";',
+      'import { decide } from "@chess-one/challenge-domain";',
+      'import { randomBytes, randomInt } from "node:crypto";',
+    ]) {
+      expect(rulesFor(ch("a.ts", code)), code).toEqual([]);
+    }
+    for (const code of [
+      'import Fastify from "fastify";',
+      'import { Kysely } from "kysely";',
+      'import pg from "pg";',
+      'import { startGame } from "@chess-one/live-game";',
+      'import { GameWriterRegistry } from "@chess-one/live-game-runtime";',
+      'import { GameAccess } from "@chess-one/game-access";',
+      'import { createRealtimeEdge } from "@chess-one/edge";',
+      'import { PostgresChallengeStore } from "@chess-one/challenges-persistence";',
+    ]) {
+      expect(rulesFor(ch("a.ts", code)), code).toContain("forbidden_import");
+    }
+    for (const code of ["const t = Date.now();", "const r = Math.random();"]) {
+      expect(rulesFor(ch("a.ts", code)), code).toContain("ambient_access");
+    }
+  });
+
+  it("TST-BOUNDARY-048 the challenge store adapter has no transport, game, or edge", () => {
+    expect(rulesFor(chStore("a.ts", 'import { Kysely } from "kysely";'))).toEqual([]);
+    for (const code of [
+      'import Fastify from "fastify";',
+      'import { createRealtimeEdge } from "@chess-one/edge";',
+      'import { startGame } from "@chess-one/live-game";',
+      'import { GameAccess } from "@chess-one/game-access";',
+    ]) {
+      expect(rulesFor(chStore("a.ts", code)), code).toContain("forbidden_import");
+    }
+  });
+
+  it("TST-BOUNDARY-049 accounts, game access, the core, and the runtime know nothing of challenges", () => {
+    for (const layer of [id, acc, accStore, ga, gaStore, lg, rt]) {
+      for (const code of [
+        'import { Challenges } from "@chess-one/challenges";',
+        'import { decide } from "@chess-one/challenge-domain";',
+      ]) {
+        expect(rulesFor(layer("a.ts", code)), `${layer("a.ts", "").path} ${code}`).not.toEqual([]);
+      }
+    }
+  });
+
+  it("TST-BOUNDARY-050 the edge uses the challenges application, never its store; clients use neither", () => {
+    expect(
+      rulesFor(edge("a.ts", 'import type { ChallengeApi } from "@chess-one/challenges";')),
+    ).toEqual([]);
+    expect(
+      rulesFor(
+        edge("a.ts", 'import { PostgresChallengeStore } from "@chess-one/challenges-persistence";'),
+      ),
+    ).toContain("forbidden_import");
+    const client = (content: string): SourceFile => ({ path: "clients/web/src/a.ts", content });
+    expect(rulesFor(client('import { Challenges } from "@chess-one/challenges";'))).toContain(
+      "client_imports_server",
+    );
+    expect(
+      rulesFor(
+        client('import { PostgresChallengeStore } from "@chess-one/challenges-persistence";'),
       ),
     ).toContain("client_imports_persistence");
   });

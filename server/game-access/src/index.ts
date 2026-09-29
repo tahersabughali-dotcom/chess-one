@@ -1,5 +1,6 @@
 export {
   type AssignedGame,
+  type AssignedGameCheck,
   type AssignedGameError,
   type AssignedGameRequest,
   type AssignmentPolicy,
@@ -31,6 +32,8 @@ export {
   type ControlNotice,
   type ControlRevocation,
   type GameAccessDecision,
+  type ReadyDecision,
+  type ReadyRefusal,
   type ReplayAccess,
   type SeatControl,
   type SeatControlRecord,

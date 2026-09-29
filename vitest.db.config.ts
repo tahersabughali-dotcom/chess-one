@@ -12,6 +12,7 @@ export default defineConfig({
       "tests/realtime/**/*.db.test.ts",
       "tests/accounts/**/*.db.test.ts",
       "tests/game-access/**/*.db.test.ts",
+      "tests/challenges/**/*.db.test.ts",
     ],
     fileParallelism: false,
     testTimeout: 30_000,

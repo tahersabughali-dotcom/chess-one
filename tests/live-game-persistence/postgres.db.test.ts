@@ -290,6 +290,7 @@ const EXPECTED_CONSTRAINTS = [
   "live_games.live_games_game_id_format:c",
   "live_games.live_games_offer_only_when_active:c",
   "live_games.live_games_pkey:p",
+  "live_games.live_games_pre_game_shape:c",
   "live_games.live_games_sequence_nonnegative:c",
   "live_games.live_games_state_format:c",
   "live_games.live_games_state_matches_columns:c",
@@ -310,13 +311,19 @@ const EXPECTED_CONSTRAINTS = [
 const EXPECTED_INDEXES = [
   "live_game_command_bindings.live_game_command_bindings_ordinal_key",
   "live_game_command_bindings.live_game_command_bindings_pkey",
+  "live_games.live_games_awaiting_deadline_idx",
   "live_games.live_games_pkey",
   "outbox_events.outbox_events_once_per_aggregate_sequence",
   "outbox_events.outbox_events_pending_idx",
   "outbox_events.outbox_events_pkey",
 ];
 
-const MIGRATION_NAMES = ["001_live_games", "002_live_game_command_bindings", "003_outbox_events"];
+const MIGRATION_NAMES = [
+  "001_live_games",
+  "002_live_game_command_bindings",
+  "003_outbox_events",
+  "004_live_game_lifecycle",
+];
 
 function bindingRow(clientCommandId: string, ordinal: number) {
   return {
@@ -423,11 +430,9 @@ describe("TST-PERSIST-DB PostgreSQL integration (needs a local test database)", 
 
         const again = await migrateToLatest(harness.db, MIGRATIONS);
         expect(again.error).toBeUndefined();
-        expect(again.results?.map((result) => result.status)).toEqual([
-          "Success",
-          "Success",
-          "Success",
-        ]);
+        expect(again.results?.map((result) => result.status)).toEqual(
+          MIGRATION_NAMES.map(() => "Success"),
+        );
         expect(await constraints()).toEqual(EXPECTED_CONSTRAINTS);
         expect(await applied()).toEqual(MIGRATION_NAMES);
         const idle = await migrateToLatest(harness.db, MIGRATIONS);

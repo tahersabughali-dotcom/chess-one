@@ -14,12 +14,12 @@ import type {
 import type { FactSink } from "@chess-one/live-game-runtime";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { EdgeFact } from "../facts.ts";
+import { guardScope, header, type ScopeFailure } from "../http/guarded-scope.ts";
 import {
   isJsonObject,
   type JsonLimits,
   type JsonObject,
   type JsonResult,
-  parseStrictJson,
 } from "../protocol/strict-json.ts";
 import {
   type CookieRead,
@@ -43,8 +43,14 @@ export const AUTH_JSON_LIMITS: JsonLimits = Object.freeze({
   maxArrayLength: 0,
 });
 
-const SAFE_METHODS = new Set(["GET", "HEAD"]);
-const JSON_MEDIA_TYPE = /^application\/json(?:\s*;\s*charset=utf-8)?$/i;
+const SCOPE_FAILURE_CODES: Readonly<Record<ScopeFailure, AuthErrorCode>> = Object.freeze({
+  origin_not_allowed: "ORIGIN_NOT_ALLOWED",
+  unsupported_media_type: "UNSUPPORTED_MEDIA_TYPE",
+  payload_too_large: "PAYLOAD_TOO_LARGE",
+  invalid_request: "INVALID_REQUEST",
+  not_found: "NOT_FOUND",
+  unavailable: "SERVICE_UNAVAILABLE",
+});
 
 export interface AuthRouteOptions {
   readonly accounts: AccountsApi;
@@ -63,11 +69,6 @@ type ServiceError =
   | ResetPasswordError
   | VerificationRequestError
   | VerificationError;
-
-function header(request: FastifyRequest, name: string): string | null {
-  const value = request.headers[name];
-  return typeof value === "string" ? value : null;
-}
 
 function fail(
   reply: FastifyReply,
@@ -109,13 +110,6 @@ function serviceError(reply: FastifyReply, error: ServiceError): FastifyReply {
   }
 }
 
-/** The HTTP status a Fastify framework error carries (body too large, bad media type, ...). */
-function statusOf(error: unknown): number | null {
-  if (typeof error !== "object" || error === null || !("statusCode" in error)) return null;
-  const { statusCode } = error;
-  return typeof statusCode === "number" ? statusCode : null;
-}
-
 /** The member named `name` of a parsed body if it is a string. */
 function text(body: JsonObject | null, name: string): string | null {
   const value = body?.get(name);
@@ -123,26 +117,14 @@ function text(body: JsonObject | null, name: string): string | null {
 }
 
 /**
- * The `/auth` routes. State changes are POST or DELETE only, and every one
- * must come from an allowlisted Origin with a JSON body: a cross-site form
- * cannot send `application/json`, and a cross-site fetch cannot forge Origin.
- * With SameSite=Lax cookies that is the CSRF defence (AUTH-CSRF-001). No
- * CORS headers are ever sent: the API serves its own origins only.
+ * The `/auth` routes. State changes are POST or DELETE only, behind the
+ * shared browser protections of `guardScope` (AUTH-CSRF-001). No CORS
+ * headers are ever sent: the API serves its own origins only.
  */
 export function registerAuthRoutes(app: FastifyInstance, options: AuthRouteOptions): void {
   const { accounts, cookie, facts } = options;
   const bodies = new WeakMap<FastifyRequest, JsonResult>();
   const cleared = clearedSessionCookieHeader(cookie);
-
-  const refuse = (
-    reply: FastifyReply,
-    status: number,
-    code: AuthErrorCode,
-    reason: "origin" | "fetch_site" | "media_type",
-  ): FastifyReply => {
-    facts.record({ name: "auth_request_refused", reason });
-    return fail(reply, status, code);
-  };
 
   const readCookie = (request: FastifyRequest): CookieRead => {
     const read = readSessionCookie(header(request, "cookie"), cookie, options.maxCookieLength);
@@ -182,46 +164,15 @@ export function registerAuthRoutes(app: FastifyInstance, options: AuthRouteOptio
 
   app.register(
     async (scope) => {
-      scope.removeAllContentTypeParsers();
-      scope.addContentTypeParser(
-        "application/json",
-        { parseAs: "string", bodyLimit: AUTH_BODY_LIMIT },
-        (request, body, done) => {
-          const source = typeof body === "string" ? body : body.toString("utf8");
-          bodies.set(request, parseStrictJson(source, AUTH_JSON_LIMITS));
-          done(null, null);
-        },
-      );
-
-      scope.addHook("onRequest", async (request, reply) => {
-        if (header(request, "sec-fetch-site") === "cross-site") {
-          return refuse(reply, 403, "ORIGIN_NOT_ALLOWED", "fetch_site");
-        }
-        if (SAFE_METHODS.has(request.method)) return;
-        const origin = header(request, "origin");
-        if (origin === null || !options.allowedOrigins.has(origin)) {
-          return refuse(reply, 403, "ORIGIN_NOT_ALLOWED", "origin");
-        }
-        if (
-          request.method === "POST" &&
-          !JSON_MEDIA_TYPE.test(header(request, "content-type") ?? "")
-        ) {
-          return refuse(reply, 415, "UNSUPPORTED_MEDIA_TYPE", "media_type");
-        }
+      guardScope(scope, {
+        allowedOrigins: options.allowedOrigins,
+        bodyLimit: AUTH_BODY_LIMIT,
+        jsonLimits: AUTH_JSON_LIMITS,
+        bodies,
+        refused: (reason) => facts.record({ name: "auth_request_refused", reason }),
+        fail: (reply, status, failure) => fail(reply, status, SCOPE_FAILURE_CODES[failure]),
+        reportDefect: options.reportDefect,
       });
-
-      scope.setErrorHandler((error: unknown, _request, reply) => {
-        const status = statusOf(error);
-        if (status === 413) return fail(reply, 413, "PAYLOAD_TOO_LARGE");
-        if (status === 415) return fail(reply, 415, "UNSUPPORTED_MEDIA_TYPE");
-        if (status !== null && status >= 400 && status < 500) {
-          return fail(reply, 400, "INVALID_REQUEST");
-        }
-        options.reportDefect(error);
-        return fail(reply, 503, "SERVICE_UNAVAILABLE");
-      });
-
-      scope.setNotFoundHandler((_request, reply) => fail(reply, 404, "NOT_FOUND"));
 
       scope.post("/register", async (request, reply) => {
         const body = jsonObject(request, 3);

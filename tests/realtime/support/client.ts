@@ -85,8 +85,17 @@ export class TestClient {
 
   /** Consumes the first unread message of `type`, waiting for it if needed. */
   next(type: string, timeoutMs = WAIT_MS): Promise<unknown> {
+    return this.nextWhere((message) => typeOf(message) === type, timeoutMs, type);
+  }
+
+  /** Consumes the first unread message `matches` accepts, waiting for it if needed. */
+  nextWhere(
+    matches: (message: unknown) => boolean,
+    timeoutMs = WAIT_MS,
+    type = "matching message",
+  ): Promise<unknown> {
     const take = (): { found: true; message: unknown } | { found: false } => {
-      const index = this.#unread.findIndex((message) => typeOf(message) === type);
+      const index = this.#unread.findIndex(matches);
       if (index < 0) return { found: false };
       const [message] = this.#unread.splice(index, 1);
       return { found: true, message };

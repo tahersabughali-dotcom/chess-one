@@ -1,17 +1,21 @@
 import { err, ok, type Result } from "@chess-one/game-values";
 import {
   type ActiveGameState,
+  type AwaitingGameIndex,
   type CreateError,
   type GameId,
   type LiveGameRepository,
   type LiveGameWriter,
+  type NewAwaitingGame,
   type NewGame,
   type NewGameError,
   type PersistenceFailure,
   startGame,
+  storeAwaitingGame,
 } from "@chess-one/live-game";
-import type { ClockDomain, WakeScheduler } from "./clock.ts";
+import type { ClockDomain, WakeScheduler, WallClock } from "./clock.ts";
 import type { FactSink, RuntimeFact } from "./facts.ts";
+import { createSystemWallClock } from "./system.ts";
 import type { Activation, GameControlPort, GameWriterPort, WriterLimits } from "./writer-port.ts";
 import { InfrastructurePauses, type InfrastructureReason } from "./writer-recovery.ts";
 import { GameWriterRuntime } from "./writer-runtime.ts";
@@ -35,6 +39,10 @@ export interface RegistryOptions {
   readonly facts: FactSink<RuntimeFact>;
   readonly reportDefect: (error: unknown) => void;
   readonly limits?: Partial<RuntimeLimits>;
+  /** UTC wall clock for start deadlines; the host's by default. */
+  readonly wallClock?: WallClock;
+  /** Where `expireAwaitingGames` finds overdue awaiting games; without it, it finds none. */
+  readonly awaitingGames?: AwaitingGameIndex;
 }
 
 /** What a transport may ask of the registry. */
@@ -44,13 +52,12 @@ export interface WriterDirectory {
 
 /**
  * What the trusted game-access layer may ask of the registry: a writer that
- * also applies control leases, and the creation of assigned games.
+ * also applies control leases and marks seats ready, and the creation of
+ * assigned games, which always await their players.
  */
 export interface ControlDirectory {
   acquire(gameId: GameId): GameControlPort | null;
-  startGame(
-    game: Omit<NewGame, "startedAtMonotonicMs">,
-  ): Promise<Result<StartedGame, StartGameError>>;
+  createAwaitingGame(game: NewAwaitingGame): Promise<Result<StartedGame, StartGameError>>;
 }
 
 /**
@@ -119,10 +126,12 @@ function resolveLimits(overrides: Partial<RuntimeLimits> | undefined): RuntimeLi
  * game as `CONCURRENCY_OWNERSHIP_UNCERTAIN` and stop its writer; no writer
  * is started again by itself.
  *
- * LIVE-WRITER-ACTIVATION-001: every game that enters play in this process
- * enters through `startGame` (or, for a future re-entry, `activate`), which
- * holds its writer before anything is stored and arms its deadline before
- * returning. A running game is then always watched by its writer, or paused.
+ * LIVE-WRITER-ACTIVATION-001: every game created in this process is created
+ * through `createAwaitingGame` (or the `startGame` seam), which holds its
+ * writer before anything is stored and activates it before returning. An
+ * awaiting game enters play only through its writer's start, which arms the
+ * running clock's deadline in the same step. A running game is then always
+ * watched by its writer, or paused.
  */
 export class GameWriterRegistry implements WriterDirectory, ControlDirectory {
   readonly #writers = new Map<GameId, GameWriterRuntime>();
@@ -130,11 +139,13 @@ export class GameWriterRegistry implements WriterDirectory, ControlDirectory {
   readonly #options: RegistryOptions;
   readonly #limits: RuntimeLimits;
   readonly #writer: LiveGameWriter;
+  readonly #wallClock: WallClock;
   #disposed = false;
 
   constructor(options: RegistryOptions) {
     this.#options = options;
     this.#limits = resolveLimits(options.limits);
+    this.#wallClock = options.wallClock ?? createSystemWallClock();
     this.#writer = Object.freeze({
       repository: options.repository,
       clockDomainId: options.clockDomain.id,
@@ -183,25 +194,77 @@ export class GameWriterRegistry implements WriterDirectory, ControlDirectory {
    * and activated before this returns, so the deadline is watched with no
    * connection open. A create reported failed is reconciled, never assumed
    * (`CreateUnconfirmed`). A game id this process paused is refused. The
-   * trusted caller supplies players and leases.
+   * trusted caller supplies players and leases. A seam for tests and
+   * tooling: no product flow creates a running game (`createAwaitingGame`).
    */
-  async startGame(
+  startGame(
     game: Omit<NewGame, "startedAtMonotonicMs">,
   ): Promise<Result<StartedGame, StartGameError>> {
-    if (this.#disposed) return err(refused("writer_stopped"));
-    if (this.#pauses.reasonOf(game.gameId) !== undefined) return err(refused("game_paused"));
-    const reserved = !this.#writers.has(game.gameId);
-    const runtime = this.#runtime(game.gameId);
-    if (runtime === null) return err(refused(this.#refusal()));
-    const started = await startGame(this.#writer, {
-      ...game,
-      startedAtMonotonicMs: this.#options.clockDomain.clock.now(),
-    });
-    if (started.ok) {
-      const activation = await runtime.activate();
-      return ok(Object.freeze({ state: started.value, activation }));
+    return this.#create(game.gameId, true, () =>
+      startGame(this.#writer, {
+        ...game,
+        startedAtMonotonicMs: this.#options.clockDomain.clock.now(),
+      }),
+    );
+  }
+
+  /**
+   * Creates and stores a game awaiting its players: no clock runs until both
+   * are ready and its writer starts it, and it is aborted at
+   * `startDeadlineAtWallMs`. Held, activated, and reconciled exactly as
+   * `startGame`, except that a create found stored on reconciliation is not
+   * paused: nothing ran, and its stored state is the created one.
+   */
+  async createAwaitingGame(game: NewAwaitingGame): Promise<Result<StartedGame, StartGameError>> {
+    const created = await this.#create(game.gameId, false, () =>
+      storeAwaitingGame(this.#writer, game),
+    );
+    if (created.ok) {
+      this.#options.facts.record({ name: "game_awaiting_players", gameId: game.gameId });
     }
-    const { error } = started;
+    return created;
+  }
+
+  /**
+   * Maintenance hook for a future scheduler: asks the index for up to
+   * `limit` awaiting games whose start deadline has passed and has each one's
+   * writer reload it, which aborts it. Returns how many are now aborted.
+   * Reads and actions already abort an overdue game without it.
+   */
+  async expireAwaitingGames(limit: number): Promise<number> {
+    const index = this.#options.awaitingGames;
+    if (index === undefined || this.#disposed) return 0;
+    const due = await index.dueAwaitingGames(this.#wallClock.now(), limit);
+    if (!due.ok) {
+      this.#options.facts.record({ name: "awaiting_sweep_failed" });
+      return 0;
+    }
+    let aborted = 0;
+    for (const gameId of due.value) {
+      const activation = await this.activate(gameId);
+      if (activation.kind === "stopped" && activation.view.status.kind === "aborted_before_start") {
+        aborted += 1;
+      }
+    }
+    return aborted;
+  }
+
+  async #create(
+    gameId: GameId,
+    pauseIfStored: boolean,
+    store: () => Promise<Result<ActiveGameState, NewGameError | CreateError>>,
+  ): Promise<Result<StartedGame, StartGameError>> {
+    if (this.#disposed) return err(refused("writer_stopped"));
+    if (this.#pauses.reasonOf(gameId) !== undefined) return err(refused("game_paused"));
+    const reserved = !this.#writers.has(gameId);
+    const runtime = this.#runtime(gameId);
+    if (runtime === null) return err(refused(this.#refusal()));
+    const created = await store();
+    if (created.ok) {
+      const activation = await runtime.activate();
+      return ok(Object.freeze({ state: created.value, activation }));
+    }
+    const { error } = created;
     if (typeof error === "string") {
       if (reserved) await runtime.dispose();
       return err(error);
@@ -210,12 +273,8 @@ export class GameWriterRegistry implements WriterDirectory, ControlDirectory {
       await runtime.activate();
       return err(error);
     }
-    this.#options.facts.record({
-      name: "persistence_failure",
-      gameId: game.gameId,
-      operation: "create",
-    });
-    return err(await this.#reconcileCreate(runtime));
+    this.#options.facts.record({ name: "persistence_failure", gameId, operation: "create" });
+    return err(await this.#reconcileCreate(runtime, pauseIfStored));
   }
 
   /** Stops every writer after its job in progress; afterwards nothing is acquired. */
@@ -241,6 +300,7 @@ export class GameWriterRegistry implements WriterDirectory, ControlDirectory {
       gameId,
       writer: this.#writer,
       clock: this.#options.clockDomain.clock,
+      wallClock: this.#wallClock,
       scheduler: this.#options.scheduler,
       limits: this.#limits,
       facts: this.#options.facts,
@@ -260,7 +320,10 @@ export class GameWriterRegistry implements WriterDirectory, ControlDirectory {
    * writer's queue, on a fresh connection of its pool. Whatever it finds,
    * the writer was never activated, so no deadline was armed meanwhile.
    */
-  async #reconcileCreate(runtime: GameWriterRuntime): Promise<CreateUnconfirmed> {
+  async #reconcileCreate(
+    runtime: GameWriterRuntime,
+    pauseIfStored: boolean,
+  ): Promise<CreateUnconfirmed> {
     const { gameId } = runtime;
     const read = await this.#options.repository.loadGame(gameId);
     if (!read.ok && read.error.kind === "game_not_found") {
@@ -278,7 +341,7 @@ export class GameWriterRegistry implements WriterDirectory, ControlDirectory {
       return Object.freeze({ kind: "create_unconfirmed", reconciliation: "unknown" });
     }
     this.#options.facts.record({ name: "create_reconciled", gameId, outcome: "stored" });
-    runtime.pause("PERSISTENCE_UNAVAILABLE");
+    if (pauseIfStored) runtime.pause("PERSISTENCE_UNAVAILABLE");
     const activation = await runtime.activate();
     return Object.freeze({ kind: "create_unconfirmed", reconciliation: "stored", activation });
   }

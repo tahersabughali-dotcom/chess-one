@@ -2,11 +2,12 @@ import type {
   ClaimDecision,
   ControlNotice,
   GameAccessDecision,
+  ReadyDecision,
   ReplayAccess,
   SeatControl,
   SessionGameAuthority,
 } from "@chess-one/game-access";
-import type { ControlLeaseId, GameId, Seat } from "@chess-one/live-game-runtime";
+import type { ControlLeaseId, GameId, ReadyPresence, Seat } from "@chess-one/live-game-runtime";
 import type { ControlRevokedCode } from "./protocol/server-messages.ts";
 
 const NOT_HELD: SeatControl = Object.freeze({ held: false });
@@ -127,6 +128,11 @@ export class ConnectionSeats {
   /** Asks game access, freshly, whether this session may read its seat's stored decisions. */
   replayAccess(gameId: GameId): Promise<ReplayAccess> {
     return this.#authority.replayAccess(gameId);
+  }
+
+  /** Declares this session's seat ready on the connection whose presence this is. */
+  ready(gameId: GameId, presence: ReadyPresence): Promise<ReadyDecision> {
+    return this.#authority.ready(gameId, presence);
   }
 
   /** The writer refused `lease`: this session no longer controls the seat. */

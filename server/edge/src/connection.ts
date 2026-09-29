@@ -1,5 +1,7 @@
 import {
   type ClaimDecision,
+  type ReadyDecision,
+  type ReadyRefusal,
   type SeatListing,
   trustedCommandContext,
 } from "@chess-one/game-access";
@@ -8,10 +10,13 @@ import type {
   CommandOutcome,
   ControlLeaseId,
   GameId,
+  GameLifecycle,
   GameSubscriber,
   GameView,
   GameWriterPort,
   IngressRefused,
+  NotInPlay,
+  Readiness,
   RecoveryReason,
   ReplayOutcome,
   Seat,
@@ -34,6 +39,7 @@ import {
   type ControlDeniedCode,
   encodeCommandResponse,
   encodeSnapshot,
+  otherSeat,
   type RequestFailure,
   type ServerMessage,
   type SnapshotWire,
@@ -64,6 +70,7 @@ interface Subscription {
 
 type Refusal = { readonly busy: BusyCode } | { readonly failed: RequestFailure };
 
+const BOTH_READY: Readiness = Object.freeze({ white: true, black: true });
 const decoder = new TextDecoder("utf-8", { fatal: true });
 const encoder = new TextEncoder();
 
@@ -75,6 +82,28 @@ function failureOf(reason: UnavailableReason): RequestFailure {
       return "GAME_NOT_FOUND";
     case "game_corrupt":
       return "GAME_UNAVAILABLE";
+  }
+}
+
+function notInPlayFailure(lifecycle: NotInPlay["lifecycle"]): RequestFailure {
+  return lifecycle === "awaiting_players" ? "GAME_NOT_STARTED" : "GAME_ABORTED_BEFORE_START";
+}
+
+/** `connection_closed` is only ever this connection's own close, so nothing is delivered. */
+function readyFailure(reason: ReadyRefusal): RequestFailure {
+  switch (reason) {
+    case "no_access":
+      return "GAME_ACCESS_DENIED";
+    case "session_ended":
+      return "SESSION_ENDED";
+    case "control_not_held":
+      return "CONTROL_NOT_HELD";
+    case "game_not_awaiting":
+      return "GAME_NOT_AWAITING";
+    case "start_deadline_passed":
+      return "START_DEADLINE_PASSED";
+    case "connection_closed":
+      return "TEMPORARILY_UNAVAILABLE";
   }
 }
 
@@ -122,6 +151,11 @@ export class RealtimeConnection {
   readonly #onClosed: (connection: RealtimeConnection) => void;
   readonly #bucket: TokenBucket;
   readonly #subscriptions = new Map<GameId, Subscription>();
+  /**
+   * This connection's presence for ready marks: open until the connection
+   * starts closing. A writer counts a mark only while its presence is open.
+   */
+  readonly #presence: { open: boolean } = { open: true };
   readonly #markClosed: () => void;
   #state: "awaiting_hello" | "ready" | "closing" | "closed" = "awaiting_hello";
   #closeReason: CloseReason = "client";
@@ -311,8 +345,11 @@ export class RealtimeConnection {
     if (unwatch !== null) unwatch();
   }
 
+  /** On close: this connection's ready marks stop counting, and each writer is told to drop them. */
   #releaseSubscriptions(): void {
+    this.#presence.open = false;
     for (const subscription of this.#subscriptions.values()) {
+      subscription.writer.clearReady(subscription.entry.seat, this.#presence);
       subscription.writer.unsubscribe(subscription.subscriber);
     }
     this.#subscriptions.clear();
@@ -369,6 +406,9 @@ export class RealtimeConnection {
       case "claim_game_control":
         this.#claim(message.gameId, message.requestId);
         return;
+      case "ready_game":
+        this.#readyGame(message.gameId, message.requestId);
+        return;
       case "game_command":
         this.#command(message.gameId, message.command, message.requestId);
         return;
@@ -415,6 +455,8 @@ export class RealtimeConnection {
       lastSentSequence: -1,
       subscriber: {
         onUpdate: (view) => this.#deliverUpdate(subscription, view),
+        onReadinessChanged: (_gameId, readiness) =>
+          this.#readyState(subscription, readiness, "awaiting_players", null),
         onRecoveryRequired: (gameId, reason) => this.#recoveryRequired(gameId, reason, null, null),
         onWriterStopped: () => this.#writerStopped(subscription),
       },
@@ -501,6 +543,79 @@ export class RealtimeConnection {
         this.#controlDenied(gameId, requestId, "TEMPORARILY_UNAVAILABLE");
       },
     );
+  }
+
+  /**
+   * Readiness is this session's, on this connection: the connection
+   * subscribes first, so it hears the barrier and the start; game access
+   * then proves the session, the account, the seat, and control, and the
+   * writer decides on its fresh load.
+   */
+  #readyGame(gameId: GameId, requestId: string | null): void {
+    this.#withSeat(this.#seats.lookup(gameId), requestId, null, (entry) => {
+      const subscription = this.#subscribe(entry);
+      if (!("writer" in subscription)) {
+        this.#refuse(subscription, requestId, null);
+        return;
+      }
+      this.#seats.ready(gameId, this.#presence).then(
+        (decision) => this.#readyDecided(subscription, decision, requestId),
+        (error: unknown) => {
+          this.#config.reportDefect(error);
+          this.#failed(requestId, "TEMPORARILY_UNAVAILABLE", null);
+        },
+      );
+    });
+  }
+
+  #readyDecided(
+    subscription: Subscription,
+    decision: ReadyDecision,
+    requestId: string | null,
+  ): void {
+    const { gameId } = subscription.entry;
+    this.#config.facts.record({ name: "ready_answered", gameId, outcome: decision.kind });
+    switch (decision.kind) {
+      case "ready":
+        this.#readyState(subscription, decision.readiness, "awaiting_players", requestId);
+        return;
+      case "started":
+        this.#readyState(subscription, BOTH_READY, "in_progress", requestId);
+        return;
+      case "refused":
+        this.#failed(requestId, readyFailure(decision.reason), null);
+        return;
+      case "unavailable":
+        this.#failed(requestId, "TEMPORARILY_UNAVAILABLE", null);
+        return;
+    }
+  }
+
+  #readyState(
+    subscription: Subscription,
+    readiness: Readiness,
+    lifecycle: GameLifecycle,
+    requestId: string | null,
+  ): void {
+    const { gameId, seat } = subscription.entry;
+    this.#send({
+      type: "game_ready_state",
+      requestId,
+      gameId,
+      myReady: readiness[seat],
+      opponentReady: readiness[otherSeat(seat)],
+      gameLifecycle: lifecycle,
+    });
+  }
+
+  #notInPlay(
+    gameId: GameId,
+    lifecycle: NotInPlay["lifecycle"],
+    requestId: string | null,
+    clientCommandId: string,
+  ): void {
+    this.#config.facts.record({ name: "command_refused_not_started", gameId });
+    this.#failed(requestId, notInPlayFailure(lifecycle), clientCommandId);
   }
 
   #controlDenied(gameId: GameId, requestId: string | null, code: ControlDeniedCode): void {
@@ -597,6 +712,8 @@ export class RealtimeConnection {
     } else if (ingress.reason === "control_not_held") {
       this.#seats.lost(entry, lease);
       this.#historical(entry, command, requestId);
+    } else if (ingress.reason === "not_in_play") {
+      this.#notInPlay(gameId, ingress.lifecycle, requestId, clientCommandId);
     } else {
       this.#refuseIngress(gameId, ingress, requestId, clientCommandId);
     }
@@ -677,6 +794,9 @@ export class RealtimeConnection {
       case "identity_conflict":
         this.#failed(requestId, "INVALID_COMMAND_IDENTITY", clientCommandId);
         return;
+      case "not_in_play":
+        this.#notInPlay(entry.gameId, outcome.lifecycle, requestId, clientCommandId);
+        return;
       case "recovery_required":
         this.#recoveryRequired(outcome.gameId, outcome.reason, requestId, clientCommandId);
         return;
@@ -722,7 +842,7 @@ export class RealtimeConnection {
 
   #snapshot(subscription: Subscription, view: GameView): SnapshotWire {
     const { entry } = subscription;
-    return encodeSnapshot(view, entry.seat, entry.control.held);
+    return encodeSnapshot(view, entry.seat, entry.control.held, subscription.writer.readiness());
   }
 
   #refuseIngress(

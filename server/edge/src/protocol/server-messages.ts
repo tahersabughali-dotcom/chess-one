@@ -1,24 +1,32 @@
-import type {
-  Color,
-  CommandResponse,
-  GameId,
-  GameStatus,
-  GameView,
-  PlayerId,
-  RecoveryReason,
-  Seat,
+import {
+  type Color,
+  type CommandResponse,
+  type GameId,
+  type GameLifecycle,
+  type GameStatus,
+  type GameView,
+  lifecycleOf,
+  type PlayerId,
+  type Readiness,
+  type RecoveryReason,
+  type Seat,
 } from "@chess-one/live-game-runtime";
 import type { ProtocolViolation, REALTIME_PROTOCOL } from "./client-messages.ts";
 
 /**
- * `game_snapshot.v1`: the client-visible state of one game, separate from the
- * stored `live_game_state.v1`. It has no monotonic anchor, binding,
+ * `game_snapshot.v2`: the client-visible state of one game, separate from the
+ * stored `live_game_state.v2`. It has no monotonic anchor, binding,
  * fingerprint, control lease, player id, or clock domain. Balances are as of
- * the moment the snapshot was taken.
+ * the moment the snapshot was taken. v2 adds the pre-game lifecycle
+ * (`gameLifecycle`, `startDeadlineAt`, `myReady`, `opponentReady`, and the
+ * `awaiting_players` and `aborted_before_start` statuses); v1 is no longer
+ * sent.
  */
-export const SNAPSHOT_FORMAT = "game_snapshot.v1";
+export const SNAPSHOT_FORMAT = "game_snapshot.v2";
 
 export type StatusWire =
+  | { readonly kind: "awaiting_players" }
+  | { readonly kind: "aborted_before_start"; readonly reason: "START_DEADLINE_PASSED" }
   | { readonly kind: "active" }
   | {
       readonly kind: "finished";
@@ -47,8 +55,17 @@ export interface SnapshotWire {
   readonly seat: Seat;
   /** Whether this session controls the seat now: its commands are admitted. */
   readonly controlHeld: boolean;
-  /** Whether `claim_game_control` could take the seat now (not held, game active). */
+  /** Whether `claim_game_control` could take the seat now (not held, game awaiting or active). */
   readonly canClaimControl: boolean;
+  readonly gameLifecycle: GameLifecycle;
+  /**
+   * UTC epoch milliseconds from which a game still awaiting its players is
+   * aborted instead of started (`now >= startDeadlineAt`); null otherwise.
+   */
+  readonly startDeadlineAt: number | null;
+  /** Whether this seat's ready mark counts now; always false outside `awaiting_players`. */
+  readonly myReady: boolean;
+  readonly opponentReady: boolean;
   readonly status: StatusWire;
   /** False while the game is stopped, finished, unresolved, or paused. */
   readonly playable: boolean;
@@ -85,7 +102,12 @@ export interface CommandResponseWire {
  * stamped, or bound, and it is not one this seat already decided. Claim
  * control, then send it again. `INVALID_COMMAND_IDENTITY`: without control,
  * a command id this seat already bound was sent with a different command;
- * nothing was decided or returned.
+ * nothing was decided or returned. `GAME_NOT_STARTED`: the game awaits its
+ * players, and `GAME_ABORTED_BEFORE_START`: it was aborted before starting;
+ * either way the command was not received, stamped, bound, or sequenced.
+ * For `ready_game`: `GAME_NOT_AWAITING` (already started, aborted, or
+ * ended), `START_DEADLINE_PASSED` (the game was aborted instead), and
+ * `SESSION_ENDED`; `CONTROL_NOT_HELD` means this session must claim first.
  */
 export type RequestFailure =
   | "GAME_ACCESS_DENIED"
@@ -94,7 +116,12 @@ export type RequestFailure =
   | "TEMPORARILY_UNAVAILABLE"
   | "SUBSCRIPTION_LIMIT"
   | "CONTROL_NOT_HELD"
-  | "INVALID_COMMAND_IDENTITY";
+  | "INVALID_COMMAND_IDENTITY"
+  | "GAME_NOT_STARTED"
+  | "GAME_ABORTED_BEFORE_START"
+  | "GAME_NOT_AWAITING"
+  | "START_DEADLINE_PASSED"
+  | "SESSION_ENDED";
 
 export type ControlDeniedCode =
   | "GAME_ACCESS_DENIED"
@@ -152,6 +179,20 @@ export type ServerMessage =
       readonly clientCommandId: string | null;
     }
   | { readonly type: "sync_required"; readonly gameId: GameId; readonly reason: "WRITER_STOPPED" }
+  /**
+   * The ready barrier as this connection's seat sees it: the answer to
+   * `ready_game` (with its `requestId`), or a notice (`requestId` null) when
+   * either seat's mark was made or cleared. `in_progress` answers the ready
+   * that started the game; its `game_update` carries the started state.
+   */
+  | {
+      readonly type: "game_ready_state";
+      readonly requestId: string | null;
+      readonly gameId: GameId;
+      readonly myReady: boolean;
+      readonly opponentReady: boolean;
+      readonly gameLifecycle: GameLifecycle;
+    }
   /** This session controls the seat. `requestId` is null when another connection claimed it. */
   | {
       readonly type: "control_granted";
@@ -199,6 +240,10 @@ export type ServerMessage =
 
 export function encodeStatus(status: GameStatus): StatusWire {
   switch (status.kind) {
+    case "awaiting_players":
+      return { kind: "awaiting_players" };
+    case "aborted_before_start":
+      return { kind: "aborted_before_start", reason: status.reason };
     case "active":
       return { kind: "active" };
     case "finished": {
@@ -224,8 +269,23 @@ export function encodeStatus(status: GameStatus): StatusWire {
   }
 }
 
-export function encodeSnapshot(view: GameView, seat: Seat, controlHeld: boolean): SnapshotWire {
+export function otherSeat(seat: Seat): Seat {
+  return seat === "white" ? "black" : "white";
+}
+
+function startDeadlineOf(status: GameStatus): number | null {
+  return status.kind === "awaiting_players" ? status.startDeadlineAtWallMs : null;
+}
+
+export function encodeSnapshot(
+  view: GameView,
+  seat: Seat,
+  controlHeld: boolean,
+  readiness: Readiness,
+): SnapshotWire {
   const offer = view.pendingDrawOffer;
+  const lifecycle = lifecycleOf(view.status);
+  const awaiting = lifecycle === "awaiting_players";
   return {
     format: SNAPSHOT_FORMAT,
     gameId: view.gameId,
@@ -235,7 +295,11 @@ export function encodeSnapshot(view: GameView, seat: Seat, controlHeld: boolean)
     sideToMove: view.sideToMove,
     seat,
     controlHeld,
-    canClaimControl: !controlHeld && view.status.kind === "active",
+    canClaimControl: !controlHeld && (awaiting || lifecycle === "in_progress"),
+    gameLifecycle: lifecycle,
+    startDeadlineAt: startDeadlineOf(view.status),
+    myReady: awaiting && readiness[seat],
+    opponentReady: awaiting && readiness[otherSeat(seat)],
     status: encodeStatus(view.status),
     playable: view.condition === "running",
     recoveryRequired: view.recoveryReason !== null,

@@ -1,4 +1,4 @@
-import type { AccountStatus, UserId } from "@chess-one/identity";
+import type { AccountStatus, CanonicalUsername, UserId } from "@chess-one/identity";
 import type { SessionEndListener } from "./extensions.ts";
 import type { SecretToken, SessionId } from "./tokens.ts";
 
@@ -133,6 +133,24 @@ export interface AccountDirectory {
   isSessionActive(session: AuthenticatedSession): Promise<boolean>;
   /** Returns the unsubscribe. */
   onSessionsEnded(listener: SessionEndListener): () => void;
+}
+
+/** An account as a trusted use case may address it: never its email, sessions, or credentials. */
+export interface PlayerRecord {
+  readonly userId: UserId;
+  /** The display form. */
+  readonly username: string;
+  readonly status: AccountStatus;
+  readonly emailVerified: boolean;
+}
+
+/**
+ * Accounts as the challenge layer sees them: an exact lookup by canonical
+ * username (never by email, never a search) and by internal id.
+ */
+export interface PlayerDirectory {
+  findPlayerByUsername(username: CanonicalUsername): Promise<PlayerRecord | null>;
+  findPlayerById(userId: UserId): Promise<PlayerRecord | null>;
 }
 
 /** The public accounts API used by the HTTP transport. */

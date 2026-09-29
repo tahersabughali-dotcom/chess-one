@@ -1,5 +1,12 @@
 import type { AccountDirectory, AuthenticatedSession, SessionId } from "@chess-one/accounts";
-import type { ControlDirectory, GameId, PlayerId, Seat } from "@chess-one/live-game-runtime";
+import type { UserId } from "@chess-one/identity";
+import type {
+  ControlDirectory,
+  GameId,
+  PlayerId,
+  ReadyPresence,
+  Seat,
+} from "@chess-one/live-game-runtime";
 import type { GameAccessFactSink } from "./facts.ts";
 import { newControlLease } from "./leases.ts";
 import { type GameAccessStore, GameAccessStoreError } from "./ports.ts";
@@ -11,12 +18,14 @@ import type {
   ClaimRefusal,
   ControlRevocation,
   GameAccessDecision,
+  ReadyDecision,
+  ReadyRefusal,
   ReplayAccess,
   SeatControl,
   SeatControlRecord,
 } from "./values.ts";
 import type { ControlWatchers } from "./watchers.ts";
-import { type Applied, applyLease, gameOpenness } from "./writer-lease.ts";
+import { type Applied, applyLease, gameOpenness, markReady } from "./writer-lease.ts";
 
 export interface ControlServiceOptions {
   readonly store: GameAccessStore;
@@ -35,6 +44,7 @@ const NOT_HELD: SeatControl = Object.freeze({ held: false });
 const REPLAY_DENIED: ReplayAccess = Object.freeze({ kind: "denied" });
 const REPLAY_SESSION_ENDED: ReplayAccess = Object.freeze({ kind: "session_ended" });
 const REPLAY_UNAVAILABLE: ReplayAccess = Object.freeze({ kind: "unavailable" });
+const READY_UNAVAILABLE: ReadyDecision = Object.freeze({ kind: "unavailable" });
 
 function seatOfResolution(resolution: AccessResolution): Seat | null {
   if (resolution === "player_white") return "white";
@@ -161,6 +171,68 @@ export class GameControlService {
     } catch (error: unknown) {
       this.#storeFailed("claim", error);
       return this.#claimUnavailable(gameId);
+    }
+  }
+
+  /**
+   * The session's player declares its seat ready. Checked here, at the
+   * request: the seat is the player's, the session and the account are
+   * active, and this session holds the seat's control, whose stored lease is
+   * applied to the writer first. The writer then decides, at its turn, on a
+   * fresh load: the game still awaiting, the lease still the seat's, the
+   * presence still open, and the deadline not passed. Serialized with the
+   * game's control changes, so a takeover lands wholly before or after it.
+   */
+  async ready(
+    session: AuthenticatedSession,
+    playerId: PlayerId,
+    gameId: GameId,
+    presence: ReadyPresence,
+  ): Promise<ReadyDecision> {
+    const resolution = await this.#resolver.resolve(playerId, gameId);
+    if (resolution === "unavailable") return this.#readyUnavailable(gameId);
+    const seat = seatOfResolution(resolution);
+    if (seat === null) {
+      this.#denied(gameId, resolution);
+      return this.#readyRefused(gameId, "no_access");
+    }
+    try {
+      return await this.#serial.run(gameId, () => this.#readySeat(session, gameId, seat, presence));
+    } catch (error: unknown) {
+      this.#storeFailed("resolve", error);
+      return this.#readyUnavailable(gameId);
+    }
+  }
+
+  async #readySeat(
+    session: AuthenticatedSession,
+    gameId: GameId,
+    seat: Seat,
+    presence: ReadyPresence,
+  ): Promise<ReadyDecision> {
+    const active = await this.#sessionActive(session);
+    if (active === "unavailable") return this.#readyUnavailable(gameId);
+    if (!active) return this.#readyRefused(gameId, "session_ended");
+    const standing = await this.#standing(session.userId);
+    if (standing === "unavailable") return this.#readyUnavailable(gameId);
+    if (standing !== "active") return this.#readyRefused(gameId, "session_ended");
+    const control = await this.#control(gameId, seat);
+    if (control.controllingSessionId !== session.sessionId) {
+      return this.#readyRefused(gameId, "control_not_held");
+    }
+    const applied = await applyLease(this.#writers, gameId, seat, control.controlLeaseId);
+    if (applied === "not_applied") return this.#readyUnavailable(gameId);
+    const outcome = await markReady(this.#writers, gameId, seat, control.controlLeaseId, presence);
+    switch (outcome.kind) {
+      case "ready":
+        return { kind: "ready", seat, readiness: outcome.readiness };
+      case "started":
+        return { kind: "started", seat };
+      case "refused":
+        return { kind: "refused", reason: outcome.reason };
+      case "recovery_required":
+      case "unavailable":
+        return this.#readyUnavailable(gameId);
     }
   }
 
@@ -307,6 +379,26 @@ export class GameControlService {
       this.#reportDefect(error);
       return "unavailable";
     }
+  }
+
+  async #standing(userId: UserId): Promise<"active" | "inactive" | "unavailable"> {
+    try {
+      const standing = await this.#accounts.accountStanding(userId);
+      return standing?.status === "active" ? "active" : "inactive";
+    } catch (error: unknown) {
+      this.#reportDefect(error);
+      return "unavailable";
+    }
+  }
+
+  #readyRefused(gameId: GameId, reason: ReadyRefusal): ReadyDecision {
+    this.#facts.record({ name: "game_ready_denied", gameId, reason });
+    return { kind: "refused", reason };
+  }
+
+  #readyUnavailable(gameId: GameId): ReadyDecision {
+    this.#facts.record({ name: "game_ready_denied", gameId, reason: "unavailable" });
+    return READY_UNAVAILABLE;
   }
 
   #denied(gameId: GameId, resolution: AccessResolution): GameAccessDecision {

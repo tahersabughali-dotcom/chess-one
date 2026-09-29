@@ -62,5 +62,14 @@ export type EdgeFact =
       readonly outcome: "granted" | "denied" | "unavailable";
     }
   | { readonly name: "control_revoked_sent"; readonly gameId: GameId }
+  /** A `ready_game` answered; codes only. */
+  | {
+      readonly name: "ready_answered";
+      readonly gameId: GameId;
+      readonly outcome: "ready" | "started" | "refused" | "unavailable";
+    }
+  /** Refused before the writer received it: the game has not started or was aborted. */
+  | { readonly name: "command_refused_not_started"; readonly gameId: GameId }
   | { readonly name: "sequence_regression_suppressed"; readonly gameId: GameId }
-  | { readonly name: "auth_request_refused"; readonly reason: AuthRefusal };
+  | { readonly name: "auth_request_refused"; readonly reason: AuthRefusal }
+  | { readonly name: "challenge_request_refused"; readonly reason: AuthRefusal };

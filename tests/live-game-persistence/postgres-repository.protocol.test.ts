@@ -1,10 +1,12 @@
 import {
   type ActiveGameState,
   type ClockDomainId,
+  COMMAND_BINDING_RECORD_FORMAT,
   type CommitPlan,
   encodeBinding,
   encodeGameState,
   isClockDomainId,
+  LIVE_GAME_STATE_FORMAT,
   planCommit,
 } from "@chess-one/live-game";
 import {
@@ -67,7 +69,7 @@ function rowsFor(state: ActiveGameState) {
         seat: stored.seat,
         client_command_id: stored.clientCommandId,
         binding_ordinal: index,
-        record_format: text(record.format),
+        record_format: text(COMMAND_BINDING_RECORD_FORMAT),
         fingerprint: stored.fingerprint,
         bound_at_sequence: String(stored.boundAtSequence),
         response: stored.response,
@@ -221,7 +223,7 @@ describe("TST-PERSIST PostgreSQL adapter protocol (recording driver, not Postgre
     ]);
     const [update, binding, outbox] = driver.queries();
     expect(update?.sql).toBe(
-      'update "live_games" set "sequence" = $1, "status_kind" = $2, "position_fen" = $3, "state" = $4, "clock_domain_id" = $5, "updated_at" = now() where "game_id" = $6 and "sequence" = $7',
+      'update "live_games" set "sequence" = $1, "status_kind" = $2, "position_fen" = $3, "state" = $4, "clock_domain_id" = $5, "state_format" = $6, "updated_at" = now() where "game_id" = $7 and "sequence" = $8',
     );
     expect(update?.parameters).toEqual([
       plan.state.sequence,
@@ -229,6 +231,7 @@ describe("TST-PERSIST PostgreSQL adapter protocol (recording driver, not Postgre
       encodeGameState(plan.state).positionFen,
       JSON.stringify(encodeGameState(plan.state)),
       DOMAIN,
+      LIVE_GAME_STATE_FORMAT,
       GAME_ID,
       String(plan.expectedSequence),
     ]);

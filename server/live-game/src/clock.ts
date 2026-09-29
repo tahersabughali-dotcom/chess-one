@@ -14,7 +14,11 @@ declare const wallClockMsBrand: unique symbol;
  */
 export type MonotonicMs = number & { readonly [monotonicMsBrand]: true };
 
-/** Wall-clock milliseconds for audit and display only. Never decides a deadline or a flag. */
+/**
+ * UTC wall-clock epoch milliseconds. Never decides a move deadline or a flag;
+ * its one decision is the pre-game start deadline (`awaiting_players`), which
+ * no chess clock is running against.
+ */
 export type WallClockMs = number & { readonly [wallClockMsBrand]: true };
 
 export function isMonotonicMs(value: number): value is MonotonicMs {
@@ -32,6 +36,12 @@ export function isWallClockMs(value: number): value is WallClockMs {
 export interface TimeControl {
   readonly kind: "sudden_death";
   readonly initialMs: DurationMs;
+}
+
+/** A sudden-death control with `initialMs` for each side, or null for no positive whole budget. */
+export function suddenDeath(initialMs: number): TimeControl | null {
+  if (!isDurationMs(initialMs) || initialMs === 0) return null;
+  return Object.freeze({ kind: "sudden_death", initialMs });
 }
 
 /**
@@ -91,6 +101,38 @@ export function startClock(
     running: true,
     anchorMs: startedAt,
   });
+}
+
+function instant(value: number): MonotonicMs {
+  return isMonotonicMs(value) ? value : clockDefect("not an instant");
+}
+
+const NO_ANCHOR: MonotonicMs = instant(0);
+
+/**
+ * The clock of a game awaiting its players: full balances, the first side to
+ * move marked active, not running, and no anchor (`anchorMs` 0 means nothing
+ * while stopped). The start transition anchors it in the writer's domain.
+ */
+export function awaitingClock(timeControl: TimeControl, firstToMove: Color): ClockState {
+  return Object.freeze({
+    timeControl: Object.freeze({ ...timeControl }),
+    remainingMs: balances(timeControl.initialMs, timeControl.initialMs),
+    activeSide: firstToMove,
+    running: false,
+    anchorMs: NO_ANCHOR,
+  });
+}
+
+/** Whether `clock` is exactly an `awaitingClock`. */
+export function isAwaitingClock(clock: ClockState): boolean {
+  const { initialMs } = clock.timeControl;
+  return (
+    !clock.running &&
+    clock.anchorMs === NO_ANCHOR &&
+    clock.remainingMs.white === initialMs &&
+    clock.remainingMs.black === initialMs
+  );
 }
 
 /**

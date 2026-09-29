@@ -1,7 +1,9 @@
 import { err, ok, type Result } from "@chess-one/game-values";
 import {
   type ActiveGameState,
+  type AwaitingGameIndex,
   type ClockDomainId,
+  COMMAND_BINDING_RECORD_FORMAT,
   type CommandBinding,
   type CommandBindingRecordV1,
   type CommitError,
@@ -18,11 +20,14 @@ import {
   type GameId,
   isClockDomainId,
   isEventId,
+  isGameId,
+  isLiveGameStateFormat,
   LIVE_GAME_STATE_FORMAT,
   type LiveGameRepository,
   type LoadError,
   type PersistenceFailure,
   type StoredGame,
+  type WallClockMs,
 } from "@chess-one/live-game";
 import { type Kysely, type Selectable, sql, type Transaction } from "kysely";
 import type { LiveGameCommandBindingsTable, LiveGameDatabase, LiveGamesTable } from "./schema.ts";
@@ -68,7 +73,7 @@ function bindingRecord(
   index: number,
 ): Result<CommandBindingRecordV1, CorruptState> {
   const path = `bindings[${index}]`;
-  if (row.record_format !== LIVE_GAME_STATE_FORMAT) {
+  if (row.record_format !== COMMAND_BINDING_RECORD_FORMAT) {
     return corruptRow(`${path}.record_format`, "unknown serialization format");
   }
   const boundAtSequence = parseInt8(row.bound_at_sequence);
@@ -101,9 +106,16 @@ function decodeRows(
   if (!isClockDomainId(clockDomainId))
     return corruptRow("row.clock_domain_id", "not a clock domain id");
   const encoded = encodeGameState(state);
+  const storedFormat =
+    typeof game.state === "object" && game.state !== null && "format" in game.state
+      ? game.state.format
+      : null;
+  if (!isLiveGameStateFormat(game.state_format)) {
+    return corruptRow("row.state_format", "unknown serialization format");
+  }
   const columns: readonly [string, unknown, unknown][] = [
     ["game_id", game.game_id, state.gameId],
-    ["state_format", game.state_format, encoded.format],
+    ["state_format", game.state_format, storedFormat],
     ["ruleset_id", game.ruleset_id, state.rulesetId],
     ["white_player_id", game.white_player_id, state.players.white],
     ["black_player_id", game.black_player_id, state.players.black],
@@ -147,7 +159,7 @@ async function insertBinding(
       seat: record.seat,
       client_command_id: record.clientCommandId,
       binding_ordinal: record.ordinal,
-      record_format: LIVE_GAME_STATE_FORMAT,
+      record_format: COMMAND_BINDING_RECORD_FORMAT,
       fingerprint: record.fingerprint,
       bound_at_sequence: record.boundAtSequence,
       response: JSON.stringify(record.response),
@@ -180,11 +192,38 @@ async function insertEvent(
  * by Kysely with bound parameters. Errors are reported as kinds and SQLSTATEs
  * only; driver messages, SQL, and stored values are never passed on.
  */
-export class PostgresLiveGameRepository implements LiveGameRepository {
+export class PostgresLiveGameRepository implements LiveGameRepository, AwaitingGameIndex {
   readonly #db: Kysely<LiveGameDatabase>;
 
   constructor(db: Kysely<LiveGameDatabase>) {
     this.#db = db;
+  }
+
+  /** Read only: the partial deadline index finds them; each abort is its writer's. */
+  async dueAwaitingGames(
+    now: WallClockMs,
+    limit: number,
+  ): Promise<Result<readonly GameId[], PersistenceFailure>> {
+    if (!Number.isSafeInteger(limit) || limit < 1) {
+      throw new RangeError("The awaiting sweep limit must be a positive integer");
+    }
+    try {
+      const { rows } = await sql<{ game_id: string }>`
+        SELECT game_id FROM live_games
+        WHERE status_kind = 'awaiting_players'
+          AND (state -> 'status' ->> 'startDeadlineAtWallMs')::bigint <= ${String(now)}::bigint
+        ORDER BY (state -> 'status' ->> 'startDeadlineAtWallMs')::bigint, game_id
+        LIMIT ${limit}
+      `.execute(this.#db);
+      const ids: GameId[] = [];
+      for (const row of rows) {
+        if (!isGameId(row.game_id)) return err(failure("load", null));
+        ids.push(row.game_id);
+      }
+      return ok(Object.freeze(ids));
+    } catch (error: unknown) {
+      return err(failure("load", error));
+    }
   }
 
   async loadGame(gameId: GameId): Promise<Result<StoredGame, LoadError>> {
@@ -265,9 +304,11 @@ export class PostgresLiveGameRepository implements LiveGameRepository {
             : plan.kind === "control"
               ? gameColumns(plan.state)
               : {};
+        /** Every rewrite of the record is in the current format; a bind-only plan rewrites nothing. */
+        const format = plan.kind === "bind_only" ? {} : { state_format: LIVE_GAME_STATE_FORMAT };
         const updated = await trx
           .updateTable("live_games")
-          .set({ ...changes, updated_at: sql<string>`now()` })
+          .set({ ...changes, ...format, updated_at: sql<string>`now()` })
           .where("game_id", "=", plan.gameId)
           .where("sequence", "=", String(plan.expectedSequence))
           .executeTakeFirst();

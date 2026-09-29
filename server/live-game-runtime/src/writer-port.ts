@@ -41,7 +41,20 @@ export type CommandIngress =
   | { readonly accepted: true; readonly receivedAt: MonotonicMs }
   | CommandLookup
   | IngressRefused
-  | ControlNotHeld;
+  | ControlNotHeld
+  | NotInPlay;
+
+/**
+ * The game has not started (`awaiting_players`) or never will
+ * (`aborted_before_start`): a new command is refused before it is stamped,
+ * so it has no receipt, no clock effect, no binding, and no sequence, and
+ * the same command id may be sent again once the game is in progress.
+ */
+export interface NotInPlay {
+  readonly accepted: false;
+  readonly reason: "not_in_play";
+  readonly lifecycle: "awaiting_players" | "aborted_before_start";
+}
 
 /**
  * Taken for a lookup of the stored bindings, not received: the writer read
@@ -117,6 +130,48 @@ export type CommandOutcome =
   | { readonly kind: "control_not_held" }
   /** A lookup found the id bound to a different command: nothing is received or returned. */
   | { readonly kind: "identity_conflict" }
+  /** A lookup found the id unbound and the game not in play: nothing is received or bound. */
+  | { readonly kind: "not_in_play"; readonly lifecycle: NotInPlay["lifecycle"] }
+  | RecoveryRequired
+  | Unavailable;
+
+/**
+ * The open realtime connection a ready mark rests on. The writer reads
+ * `open` when it marks and again when it starts the game, so a mark never
+ * outlives its connection, even if the connection closes before the mark is
+ * made.
+ */
+export interface ReadyPresence {
+  readonly open: boolean;
+}
+
+/** Which seats are ready, as of the moment it is read. Ephemeral: never stored. */
+export interface Readiness {
+  readonly white: boolean;
+  readonly black: boolean;
+}
+
+/**
+ * - `game_not_awaiting`: already started, aborted, finished, or unresolved;
+ * - `control_not_held`: the lease is not the seat's lease at the end of the queue;
+ * - `start_deadline_passed`: the deadline passed; the game is now aborted;
+ * - `connection_closed`: the presence closed before the mark was made.
+ */
+export type ReadyRefusal =
+  | "game_not_awaiting"
+  | "control_not_held"
+  | "start_deadline_passed"
+  | "connection_closed";
+
+/**
+ * A ready mark: `ready` when the seat is marked and the other is not yet
+ * (or no longer) ready; `started` when this mark completed the barrier and
+ * the writer committed the start.
+ */
+export type ReadyOutcome =
+  | { readonly kind: "ready"; readonly readiness: Readiness; readonly view: GameView }
+  | { readonly kind: "started"; readonly view: GameView }
+  | { readonly kind: "refused"; readonly reason: ReadyRefusal; readonly view: GameView | null }
   | RecoveryRequired
   | Unavailable;
 
@@ -149,12 +204,15 @@ export type SyncOutcome =
 /**
  * LIVE-WRITER-ACTIVATION-001: what activating a writer established.
  * - `watching`: the game runs and its deadline wake-up is armed;
- * - `stopped`: finished or unresolved; no timer;
+ * - `awaiting_players`: created, not started; no clock runs, and only the
+ *   start-deadline wake-up is armed;
+ * - `stopped`: finished, unresolved, or aborted before its start; no timer;
  * - `recovery_required`: paused; no competitive timer;
  * - `unavailable`: the writer could not load the game or take the request.
  */
 export type Activation =
   | { readonly kind: "watching"; readonly view: GameView }
+  | { readonly kind: "awaiting_players"; readonly view: GameView }
   | { readonly kind: "stopped"; readonly view: GameView }
   | { readonly kind: "recovery_required"; readonly reason: RecoveryReason }
   | {
@@ -171,7 +229,10 @@ export function activationOf(outcome: SyncOutcome): Activation {
   if (view.recoveryReason !== null) {
     return Object.freeze({ kind: "recovery_required", reason: view.recoveryReason });
   }
-  return Object.freeze({ kind: view.condition === "running" ? "watching" : "stopped", view });
+  if (view.condition === "running") return Object.freeze({ kind: "watching", view });
+  if (view.condition === "awaiting_players")
+    return Object.freeze({ kind: "awaiting_players", view });
+  return Object.freeze({ kind: "stopped", view });
 }
 
 /**
@@ -180,6 +241,8 @@ export function activationOf(outcome: SyncOutcome): Activation {
  */
 export interface GameSubscriber {
   onUpdate(view: GameView): void;
+  /** Readiness changed while the game awaits its players (a mark made or cleared). */
+  onReadinessChanged?(gameId: GameId, readiness: Readiness): void;
   /** Play stopped for an infrastructure failure; the subscriber stays subscribed. */
   onRecoveryRequired(gameId: GameId, reason: RecoveryReason): void;
   /** The writer stopped; the subscriber is dropped and must sync again. */
@@ -214,17 +277,39 @@ export interface GameWriterPort {
     command: LeaselessCommand,
     reply: (outcome: ReplayOutcome) => void,
   ): SyncIngress;
+  /** Which seats are ready now; both false unless the game awaits its players. */
+  readiness(): Readiness;
+  /**
+   * Drops the seat's ready mark if `presence` made it: the connection closed.
+   * Synchronous, and harmless for any other presence.
+   */
+  clearReady(seat: Seat, presence: ReadyPresence): void;
 }
 
 /**
  * What the game-access layer may ask of a writer beyond a transport: make a
- * lease the seat's lease. It may answer before returning when the lease is
- * already the seat's lease with no rotation queued.
+ * lease the seat's lease, and mark a seat ready once it has proved the
+ * session's standing and control. A rotation may answer before returning
+ * when the lease is already the seat's lease with no rotation queued.
  */
 export interface GameControlPort extends GameWriterPort {
   applyControlLease(
     seat: Seat,
     lease: ControlLeaseId,
     reply: (outcome: LeaseOutcome) => void,
+  ): SyncIngress;
+  /**
+   * Marks `seat` ready under `lease` on `presence`, at its turn in the queue,
+   * on a fresh load. When both seats then hold a valid mark (each lease
+   * still the seat's lease at the end of the queue, each presence open), the
+   * same job starts the game: one compare-and-set from sequence 0 to 1, with
+   * the first side's clock anchored at the writer's monotonic reading in
+   * that job.
+   */
+  markReady(
+    seat: Seat,
+    lease: ControlLeaseId,
+    presence: ReadyPresence,
+    reply: (outcome: ReadyOutcome) => void,
   ): SyncIngress;
 }

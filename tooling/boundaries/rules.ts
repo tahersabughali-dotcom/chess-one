@@ -89,7 +89,7 @@ const DOMAIN_POLICIES: readonly DomainPolicy[] = [
     ambientGrants: [
       {
         file: "server/live-game-runtime/src/system.ts",
-        names: ["process.hrtime", "crypto.randomUUID", "setTimeout", "clearTimeout"],
+        names: ["process.hrtime", "crypto.randomUUID", "Date.now", "setTimeout", "clearTimeout"],
       },
     ],
   },
@@ -99,6 +99,7 @@ const DOMAIN_POLICIES: readonly DomainPolicy[] = [
       "@chess-one/live-game-runtime",
       "@chess-one/accounts",
       "@chess-one/game-access",
+      "@chess-one/challenges",
       "fastify",
       "ws",
       "node:http",
@@ -108,6 +109,7 @@ const DOMAIN_POLICIES: readonly DomainPolicy[] = [
       "@chess-one/live-game-runtime",
       "@chess-one/accounts",
       "@chess-one/game-access",
+      "@chess-one/challenges",
       "fastify",
       "ws",
     ],
@@ -185,6 +187,53 @@ const DOMAIN_POLICIES: readonly DomainPolicy[] = [
       "pg",
     ],
   },
+  /**
+   * Direct challenges. The domain is pure values and the state machine over
+   * identity and the ruleset registry. The application reaches accounts
+   * through their public interfaces, generates ids and seat draws with
+   * `node:crypto`, and has no clock of its own; it knows no live game, game
+   * access, HTTP, or SQL. Its adapter knows the challenge table and reads
+   * the accounts `users` table for display usernames.
+   */
+  {
+    srcRoot: "domain/challenges/src/",
+    allowedPackages: ["@chess-one/identity", "@chess-one/chess-rules"],
+    allowedDependencies: ["@chess-one/identity", "@chess-one/chess-rules"],
+  },
+  {
+    srcRoot: "server/challenges/src/",
+    allowedPackages: [
+      "@chess-one/accounts",
+      "@chess-one/challenge-domain",
+      "@chess-one/identity",
+      "node:crypto",
+    ],
+    allowedDependencies: [
+      "@chess-one/accounts",
+      "@chess-one/challenge-domain",
+      "@chess-one/identity",
+    ],
+  },
+  {
+    srcRoot: "server/challenges-persistence/src/",
+    allowedPackages: [
+      "@chess-one/challenge-domain",
+      "@chess-one/challenges",
+      "@chess-one/identity",
+      "kysely",
+      "kysely/migration",
+      "pg",
+      "node:fs/promises",
+      "node:path",
+    ],
+    allowedDependencies: [
+      "@chess-one/challenge-domain",
+      "@chess-one/challenges",
+      "@chess-one/identity",
+      "kysely",
+      "pg",
+    ],
+  },
 ];
 
 /** Database access stays on the server: clients never reach the store or its drivers. */
@@ -195,6 +244,7 @@ const CLIENT_FORBIDDEN_PACKAGES = [
   "@chess-one/live-game-persistence",
   "@chess-one/accounts-persistence",
   "@chess-one/game-access-persistence",
+  "@chess-one/challenges-persistence",
 ];
 
 /** Clients talk to the server over the wire protocol only, never through its code. */
@@ -204,6 +254,7 @@ const CLIENT_FORBIDDEN_SERVER_PACKAGES = [
   "@chess-one/edge",
   "@chess-one/accounts",
   "@chess-one/game-access",
+  "@chess-one/challenges",
   "fastify",
   "@fastify/",
 ];

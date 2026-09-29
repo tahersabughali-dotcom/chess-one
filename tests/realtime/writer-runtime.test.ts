@@ -325,6 +325,7 @@ describe("TST-RT persistence failures and consistency", () => {
       "PERSISTENCE_UNAVAILABLE",
     ]);
     expect(view.clock).toEqual({
+      initialMs: INITIAL_MS,
       remainingMs: stored.clock.remainingMs,
       activeSide: "black",
       running: false,
@@ -375,6 +376,7 @@ describe("TST-RT persistence failures and consistency", () => {
     const view = await viewOf(writer);
     expect(view.condition).toBe("recovery_paused");
     expect(view.clock).toEqual({
+      initialMs: INITIAL_MS,
       remainingMs: fixture.state.clock.remainingMs,
       activeSide: fixture.state.clock.activeSide,
       running: false,
@@ -537,6 +539,7 @@ describe("TST-RT writer lifecycle", () => {
     ]);
     expect(view.recoveryReason).toBeNull();
     expect(view.clock).toEqual({
+      initialMs: INITIAL_MS,
       remainingMs: { white: INITIAL_MS - 5_000, black: INITIAL_MS },
       activeSide: "white",
       running: true,

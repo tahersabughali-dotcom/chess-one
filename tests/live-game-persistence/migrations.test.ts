@@ -2,7 +2,11 @@ import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { LIVE_GAME_STATE_FORMAT } from "@chess-one/live-game";
+import {
+  COMMAND_BINDING_RECORD_FORMAT,
+  LIVE_GAME_STATE_FORMAT,
+  LIVE_GAME_STATE_FORMAT_V1,
+} from "@chess-one/live-game";
 import { SqlFileMigrationProvider } from "@chess-one/live-game-persistence";
 import { describe, expect, it } from "vitest";
 
@@ -10,7 +14,14 @@ const MIGRATIONS = fileURLToPath(
   new URL("../../server/live-game-persistence/migrations", import.meta.url),
 );
 
-const NAMES = ["001_live_games", "002_live_game_command_bindings", "003_outbox_events"];
+const NAMES = [
+  "001_live_games",
+  "002_live_game_command_bindings",
+  "003_outbox_events",
+  "004_live_game_lifecycle",
+];
+/** The migrations that create a table each; later ones only alter. */
+const TABLE_MIGRATIONS = NAMES.slice(0, 3);
 
 async function sqlOf(file: string): Promise<string> {
   return readFile(join(MIGRATIONS, file), "utf8");
@@ -43,13 +54,34 @@ describe("TST-PERSIST migrations (static; applying them needs PostgreSQL, see te
       (match) => match[1],
     );
     expect(created).toEqual(["live_games", "live_game_command_bindings", "outbox_events"]);
-    for (const [index, name] of NAMES.entries()) {
+    for (const [index, name] of TABLE_MIGRATIONS.entries()) {
       const down = statements(await sqlOf(`${name}.down.sql`)).trim();
       expect(down, name).toBe(`DROP TABLE ${created[index]};`);
+    }
+    for (const name of NAMES) {
       const up = statements(await sqlOf(`${name}.up.sql`));
       expect(up, name).not.toMatch(
-        /\b(DROP|(?<!ON )DELETE|TRUNCATE|EXTENSION|GRANT|ALTER ROLE)\b/i,
+        /\b(DROP(?! CONSTRAINT)|(?<!ON )DELETE|TRUNCATE|EXTENSION|GRANT|ALTER ROLE)\b/i,
       );
+    }
+  });
+
+  it("TST-PERSIST-075 the lifecycle migration only widens live_games for v2 and its down restores the v1 checks", async () => {
+    const up = statements(await sqlOf("004_live_game_lifecycle.up.sql")).replace(/\s+/g, " ");
+    expect(up).not.toMatch(/CREATE TABLE|live_game_command_bindings|outbox_events/);
+    expect(up).toContain("CHECK (state_format IN ('live_game_state.v1', 'live_game_state.v2'))");
+    expect(up).toContain(
+      "state_format = 'live_game_state.v2' AND status_kind IN ('awaiting_players', 'aborted_before_start')",
+    );
+    expect(up).toContain("CONSTRAINT live_games_pre_game_shape");
+    expect(up).toContain("WHERE status_kind = 'awaiting_players'");
+    const down = statements(await sqlOf("004_live_game_lifecycle.down.sql")).replace(/\s+/g, " ");
+    expect(down).toContain("CHECK (state_format = 'live_game_state.v1')");
+    expect(down).toContain("CHECK (status_kind IN ('active', 'finished', 'unresolved'))");
+    expect(down).toContain("DROP CONSTRAINT live_games_pre_game_shape");
+    expect(down).toContain("DROP INDEX live_games_awaiting_deadline_idx");
+    for (const name of TABLE_MIGRATIONS) {
+      expect(await sqlOf(`${name}.up.sql`), `${name} is history`).not.toContain("v2");
     }
   });
 
@@ -74,8 +106,8 @@ describe("TST-PERSIST migrations (static; applying them needs PostgreSQL, see te
 
   it("TST-PERSIST-073 the schema pins the serialization version the codec writes", async () => {
     const up = await allUp();
-    expect(up).toContain(`state_format = '${LIVE_GAME_STATE_FORMAT}'`);
-    expect(up).toContain(`record_format = '${LIVE_GAME_STATE_FORMAT}'`);
+    expect(up).toContain(`'${LIVE_GAME_STATE_FORMAT_V1}', '${LIVE_GAME_STATE_FORMAT}'`);
+    expect(up).toContain(`record_format = '${COMMAND_BINDING_RECORD_FORMAT}'`);
     expect(statements(up)).not.toMatch(/\bjson\b(?!b)/i);
   });
 

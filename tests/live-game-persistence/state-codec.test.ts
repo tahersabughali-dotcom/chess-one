@@ -1,19 +1,25 @@
 import {
   type ActiveGameState,
+  abortIfStartDeadlinePassed,
   decodeGameState,
   encodeBinding,
   encodeGameState,
   LIVE_GAME_STATE_FORMAT,
+  LIVE_GAME_STATE_FORMAT_V1,
 } from "@chess-one/live-game";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import {
+  awaitingGame,
+  INITIAL_MS,
   moveCommand,
   newGame,
   offerCommand,
   respondCommand,
+  START_DEADLINE_MS,
   snapshot,
   submit,
+  wallClockMs,
 } from "../live-game/support/harness.ts";
 import { edit, type Json, type Path, REMOVE, read, viaJson } from "./support/json.ts";
 import {
@@ -86,7 +92,7 @@ describe("TST-PERSIST live_game_state.v1 serialization", () => {
     const { state } = pendingOffer();
     const record = encodeGameState(state);
     expect(record.format).toBe(LIVE_GAME_STATE_FORMAT);
-    expect(LIVE_GAME_STATE_FORMAT).toBe("live_game_state.v1");
+    expect(LIVE_GAME_STATE_FORMAT).toBe("live_game_state.v2");
     expect(viaJson(record)).toEqual(record);
     expect(record.positionFen).toBe(
       "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2",
@@ -188,10 +194,75 @@ describe("TST-PERSIST live_game_state.v1 serialization", () => {
   });
 });
 
+describe("TST-PERSIST live_game_state.v2 pre-game lifecycle (GAME-START-LIFECYCLE-001)", () => {
+  it("TST-PERSIST-020 a record written as v1 still decodes, with the same meaning", () => {
+    for (const { name, state } of allFixtures()) {
+      const stored = store(state);
+      const v1 = edit(stored.record, ["format"], LIVE_GAME_STATE_FORMAT_V1);
+      const decoded = decodeGameState(v1, stored.bindings);
+      expect(decoded.ok && snapshot(decoded.value), name).toEqual(snapshot(state));
+    }
+    expect(LIVE_GAME_STATE_FORMAT_V1).toBe("live_game_state.v1");
+  });
+
+  it("TST-PERSIST-021 an awaiting game round-trips: sequence 0, the deadline, full balances on a stopped clock", () => {
+    const state = awaitingGame();
+    const record = encodeGameState(state);
+    expect(record).toMatchObject({
+      format: "live_game_state.v2",
+      sequence: 0,
+      status: { kind: "awaiting_players", startDeadlineAtWallMs: START_DEADLINE_MS },
+      clock: { running: false, remainingMs: { white: INITIAL_MS, black: INITIAL_MS } },
+    });
+    expect(snapshot(load(store(state)))).toEqual(snapshot(state));
+  });
+
+  it("TST-PERSIST-022 an aborted game round-trips at sequence 1 with no result and untouched balances", () => {
+    const aborted = abortIfStartDeadlinePassed(awaitingGame(), wallClockMs(START_DEADLINE_MS));
+    if (aborted === null) throw new Error("not aborted");
+    const loaded = load(store(aborted));
+    expect(loaded.status).toEqual({
+      kind: "aborted_before_start",
+      reason: "START_DEADLINE_PASSED",
+      startDeadlineAtWallMs: START_DEADLINE_MS,
+    });
+    expect(loaded.sequence).toBe(1);
+    expect(snapshot(loaded)).toEqual(snapshot(aborted));
+    expect(JSON.stringify(encodeGameState(aborted))).not.toMatch(/result|winner|resultCode/);
+  });
+
+  it("TST-PERSIST-023 a pre-game status is refused in v1, and any pre-game record with play or a running clock is corrupt", () => {
+    const state = awaitingGame();
+    corruptState(state, ["format"], LIVE_GAME_STATE_FORMAT_V1, "state.status.kind");
+    corruptState(state, ["sequence"], 1, "state.sequence");
+    corruptState(state, ["clock", "running"], true, "state.clock");
+    corruptState(state, ["clock", "remainingMs", "white"], INITIAL_MS - 1, "state.clock");
+    corruptState(
+      state,
+      ["status", "startDeadlineAtWallMs"],
+      -1,
+      "state.status.startDeadlineAtWallMs",
+    );
+    corruptState(
+      state,
+      ["status", "startDeadlineAtWallMs"],
+      REMOVE,
+      "state.status.startDeadlineAtWallMs",
+    );
+    corruptState(state, ["lastDrawOfferMove"], 0, "state.lastDrawOfferMove");
+    const aborted = abortIfStartDeadlinePassed(state, wallClockMs(START_DEADLINE_MS));
+    if (aborted === null) throw new Error("not aborted");
+    corruptState(aborted, ["sequence"], 0, "state.sequence");
+    corruptState(aborted, ["status", "reason"], "TIMEOUT", "state.status.reason");
+    corruptState(aborted, ["status", "result"], { resultCode: "draw" }, "state.status.result");
+  });
+});
+
 describe("TST-PERSIST corrupted records fail closed", () => {
   it("TST-PERSIST-010 an unknown or missing format version is rejected", () => {
     const { state } = activeWithBindings();
-    corruptState(state, ["format"], "live_game_state.v2", "state.format");
+    corruptState(state, ["format"], "live_game_state.v3", "state.format");
+    corruptState(state, ["format"], "live_game_state.V2", "state.format");
     corruptState(state, ["format"], REMOVE, "state.format");
     corruptState(state, ["extra"], 1, "state.extra");
     corruptState(state, ["sequence"], REMOVE, "state.sequence");

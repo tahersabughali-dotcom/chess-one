@@ -3,7 +3,10 @@ export {
   type CommandBinding,
   type CommandResponse,
   createActiveGame,
+  createAwaitingGame,
   type DrawOfferDetail,
+  INITIAL_SEQUENCE,
+  type NewAwaitingGame,
   type NewGame,
   type NewGameError,
   type PendingDrawOffer,
@@ -18,6 +21,7 @@ export {
   type MonotonicMs,
   type ReceiptTiming,
   receiptTiming,
+  suddenDeath,
   type TimeControl,
   type WallClockMs,
 } from "./clock.ts";
@@ -67,6 +71,13 @@ export {
   type Seat,
 } from "./ids.ts";
 export {
+  abortIfStartDeadlinePassed,
+  isStartDeadlinePassed,
+  type LifecycleDecision,
+  startAwaitingGame,
+} from "./lifecycle.ts";
+export {
+  type AwaitingGameIndex,
   type ClockDomainId,
   type CommitError,
   type CommitPlan,
@@ -87,36 +98,46 @@ export {
 } from "./persistence/repository.ts";
 export { encodeGameFinished } from "./persistence/response-codec.ts";
 export {
+  COMMAND_BINDING_RECORD_FORMAT,
   type CommandBindingRecordV1,
   type CorruptState,
   decodeGameState,
   encodeBinding,
   encodeGameState,
+  isLiveGameStateFormat,
   LIVE_GAME_STATE_FORMAT,
-  type LiveGameStateRecordV1,
+  LIVE_GAME_STATE_FORMAT_V1,
+  type LiveGameStateFormat,
+  type LiveGameStateRecord,
 } from "./persistence/state-codec.ts";
 export {
   type CommandExecution,
+  commitLifecycle,
   type DeadlineExecution,
   type ExecutionError,
   executeCommand,
   executeDeadline,
   executeLeaseRotation,
+  executeLifecycle,
   type GameCondition,
   gameCondition,
   type LeaseRotation,
   type LeaseRotationFailure,
+  type LifecycleExecution,
   type LiveGameWriter,
   type LoadedGame,
   loadForWriter,
   type RecoveryPaused,
   type SharedControlLease,
   startGame,
+  storeAwaitingGame,
 } from "./persistence/writer.ts";
 export { type DeadlineDecision, processCommand, processDeadline } from "./process-command.ts";
-export type {
-  DrawRuleDetail,
-  GameResult,
-  GameStatus,
-  PositionFact,
+export {
+  type DrawRuleDetail,
+  type GameLifecycle,
+  type GameResult,
+  type GameStatus,
+  lifecycleOf,
+  type PositionFact,
 } from "./result.ts";

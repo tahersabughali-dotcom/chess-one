@@ -45,6 +45,8 @@ const isResponseCode = literalGuard<ResponseCode>({
   MoveReceivedAfterDeadline: true,
   MatingPossibilityUnresolved: true,
   TerminalPrecedenceUnresolved: true,
+  GameNotStarted: true,
+  GameAbortedBeforeStart: true,
 });
 
 const isResponseDetail = literalGuard<ResponseDetail>({
@@ -131,13 +133,17 @@ export function decodeResponse(value: unknown, path: string): CommandResponse {
   if (!isMonotonicMs(receivedAt)) corrupt(at("receivedAtMonotonicMs"), "not a monotonic instant");
   const sequence = readCount(field(fields, "sequence"), at("sequence"));
   if (!isGameSequence(sequence)) corrupt(at("sequence"), "not a game sequence");
+  const code = readGuarded(field(fields, "code"), at("code"), isResponseCode);
+  if (code === "GameNotStarted" || code === "GameAbortedBeforeStart") {
+    corrupt(at("code"), "a command before the start is never bound");
+  }
   return Object.freeze({
     gameId: readGuarded(field(fields, "gameId"), at("gameId"), isGameId),
     command: readGuarded(field(fields, "command"), at("command"), isCommandName),
     clientCommandId: readNullable(field(fields, "clientCommandId"), at("clientCommandId"), (v, p) =>
       readGuarded(v, p, isCommandId),
     ),
-    code: readGuarded(field(fields, "code"), at("code"), isResponseCode),
+    code,
     detail: readNullable(field(fields, "detail"), at("detail"), (v, p) =>
       readGuarded(v, p, isResponseDetail),
     ),
@@ -147,7 +153,7 @@ export function decodeResponse(value: unknown, path: string): CommandResponse {
     positionFen: readCanonicalFen(field(fields, "positionFen"), at("positionFen")),
     san: readNullable(field(fields, "san"), at("san"), readSan),
     clock: decodeClock(field(fields, "clock"), at("clock")),
-    status: decodeStatus(field(fields, "status"), at("status")),
+    status: decodeStatus(field(fields, "status"), at("status"), false),
   });
 }
 

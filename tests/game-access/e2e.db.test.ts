@@ -19,8 +19,10 @@ import {
   logIn,
   logOut,
   moveMessage,
+  readyAnswer,
   signUp,
   socketOf,
+  startFromOtherSessions,
 } from "./support/stack.ts";
 
 const APP = "chess-one-game-access-e2e-test";
@@ -137,13 +139,15 @@ describe("TST-GACC-E2E accounts, game access, control, and play over PostgreSQL"
       // 5. Both sync without control.
       expect(field(await a.sync(GAME_ID), "snapshot", "controlHeld")).toBe(false);
       expect(field(await black.sync(GAME_ID), "snapshot", "controlHeld")).toBe(false);
-      // 6. Both claim.
+      // 6. Both claim, then both declare ready: the writer starts the game (sequence 1).
       await claimGranted(a, "claim-a");
       await claimGranted(black, "claim-black");
+      expect(field(await readyAnswer(a, "ready-a"), "gameLifecycle")).toBe("awaiting_players");
+      expect(field(await readyAnswer(black, "ready-black"), "gameLifecycle")).toBe("in_progress");
       // 7. Both move; the moves are committed to PostgreSQL.
-      a.send(moveMessage("mv-1", "w-1", 0, "e2e4"));
+      a.send(moveMessage("mv-1", "w-1", 1, "e2e4"));
       expect(field(await response(a), "code")).toBe("Accepted");
-      black.send(moveMessage("mv-2", "b-1", 1, "e7e5"));
+      black.send(moveMessage("mv-2", "b-1", 2, "e7e5"));
       expect(field(await response(black), "code")).toBe("Accepted");
       // 8. A third user is refused everything, with no game data.
       await signUp(first, "Mallory");
@@ -152,16 +156,16 @@ describe("TST-GACC-E2E accounts, game access, control, and play over PostgreSQL"
       expect(await failureCode(mallory)).toBe("GAME_ACCESS_DENIED");
       mallory.send(claimMessage("m-c"));
       expect(field(await mallory.next("control_denied"), "code")).toBe("GAME_ACCESS_DENIED");
-      mallory.send(moveMessage("m-m", "m-1", 2, "g1f3"));
+      mallory.send(moveMessage("m-m", "m-1", 3, "g1f3"));
       expect(await failureCode(mallory)).toBe("GAME_ACCESS_DENIED");
       expect(JSON.stringify(mallory.received)).not.toMatch(/positionFen|seat/);
       // 9. White logs in again: session B syncs and sees the seat without control.
       const cookieB = await logIn(first, "whitey");
       const b = await socketOf(first, cookieB);
       const synced = field(await b.sync(GAME_ID), "snapshot");
-      expect([field(synced, "controlHeld"), field(synced, "sequence")]).toEqual([false, 2]);
+      expect([field(synced, "controlHeld"), field(synced, "sequence")]).toEqual([false, 3]);
       // 10. B cannot command.
-      b.send(moveMessage("mv-b0", "early", 2, "g1f3"));
+      b.send(moveMessage("mv-b0", "early", 3, "g1f3"));
       expect(await failureCode(b)).toBe("CONTROL_NOT_HELD");
       // 11. B claims.
       await claimGranted(b, "claim-b");
@@ -169,12 +173,12 @@ describe("TST-GACC-E2E accounts, game access, control, and play over PostgreSQL"
       expect(field(await a.next("control_revoked"), "code")).toBe("CONTROL_TRANSFERRED");
       // 13. A's new command is never admitted: only a read-only replay lookup.
       const commits = first.ga.runtime.repository.commits;
-      a.send(moveMessage("mv-a2", "w-2", 2, "g1f3"));
+      a.send(moveMessage("mv-a2", "w-2", 3, "g1f3"));
       expect(await failureCode(a)).toBe("CONTROL_NOT_HELD");
       expect(first.ga.runtime.facts.count("command_replayed")).toBe(0);
       expect(first.ga.runtime.repository.commits).toBe(commits);
       // 14. B's command is accepted.
-      b.send(moveMessage("mv-b1", "w-2", 2, "g1f3"));
+      b.send(moveMessage("mv-b1", "w-2", 3, "g1f3"));
       const accepted = await response(b);
       expect(field(accepted, "code")).toBe("Accepted");
       // 15. PostgreSQL: B's session holds white, the lease rotated twice, three moves.
@@ -183,7 +187,7 @@ describe("TST-GACC-E2E accounts, game access, control, and play over PostgreSQL"
       expect([rows.white?.session, rows.white?.version]).toEqual([sessionB, "2"]);
       const beforeRestart = await storedState(first.ga.runtime);
       expect(beforeRestart.controlLeases.white).toBe(rows.white?.lease);
-      expect(beforeRestart.sequence).toBe(3);
+      expect(beforeRestart.sequence).toBe(4);
       await closeAll(a, b, black, mallory);
       await finish(first);
 
@@ -193,19 +197,20 @@ describe("TST-GACC-E2E accounts, game access, control, and play over PostgreSQL"
       const b2 = await socketOf(second, cookieB);
       const after = field(await b2.sync(GAME_ID), "snapshot");
       expect(field(after, "controlHeld")).toBe(true);
-      expect(field(after, "sequence")).toBe(3);
+      expect(field(after, "sequence")).toBe(4);
+      expect(field(after, "gameLifecycle")).toBe("in_progress");
       expect(field(after, "recoveryReason")).toBe("RECOVERY_PAUSED_CLOCK_DOMAIN_CHANGED");
       expect(field(after, "playable")).toBe(false);
       expect(field(await b2.next("recovery_required"), "clientCommandId")).toBeNull();
       // 18. Control grants no resume: a new command is not executed, a claim changes nothing.
-      b2.send(moveMessage("mv-b2", "w-3", 4, "f1c4"));
+      b2.send(moveMessage("mv-b2", "w-3", 5, "f1c4"));
       const paused = await b2.next("recovery_required");
       expect(field(paused, "clientCommandId")).toBe("w-3");
       await claimGranted(b2, "claim-b2");
       expect(field(await b2.sync(GAME_ID, "sync-2"), "snapshot", "recoveryRequired")).toBe(true);
       // 19. History and idempotency survived: three bindings, in order.
       const state = await storedState(second.ga.runtime);
-      expect(state.sequence).toBe(3);
+      expect(state.sequence).toBe(4);
       expect(state.history).toEqual(beforeRestart.history);
       expect(state.position).toEqual(beforeRestart.position);
       expect(state.controlLeases).toEqual(beforeRestart.controlLeases);
@@ -218,7 +223,7 @@ describe("TST-GACC-E2E accounts, game access, control, and play over PostgreSQL"
       // 20. A, reconnecting, sees its seat but not control, and is refused.
       const a2 = await socketOf(second, cookieA);
       expect(field(await a2.sync(GAME_ID), "snapshot", "controlHeld")).toBe(false);
-      a2.send(moveMessage("mv-a3", "w-9", 3, "f1c4"));
+      a2.send(moveMessage("mv-a3", "w-9", 4, "f1c4"));
       expect(await failureCode(a2)).toBe("CONTROL_NOT_HELD");
       await closeAll(b2, a2);
       await finish(second);
@@ -269,7 +274,7 @@ describe("TST-GACC-E2E accounts, game access, control, and play over PostgreSQL"
       await stack.ga.access.settled();
       expect((await seatRows(schema)).white?.session).toBeNull();
       expect((await seatRows(schema)).black?.session).not.toBeNull();
-      expect((await storedState(stack.ga.runtime)).status.kind).toBe("active");
+      expect((await storedState(stack.ga.runtime)).status.kind).toBe("awaiting_players");
       await black.close();
       await finish(stack);
 
@@ -290,10 +295,11 @@ describe("TST-GACC-E2E accounts, game access, control, and play over PostgreSQL"
       const whiteId = await signUp(stack, "Whitey");
       const blackId = await signUp(stack, "Blacky");
       await assign(stack, whiteId, blackId);
+      await startFromOtherSessions(stack, "whitey", "blacky");
       const a = await socketOf(stack, await logIn(stack, "whitey"));
       await a.sync(GAME_ID);
       await claimGranted(a, "claim-a");
-      a.send(moveMessage("x-1", "X", 0, "e2e4"));
+      a.send(moveMessage("x-1", "X", 1, "e2e4"));
       const original = await response(a);
       expect(field(original, "code")).toBe("Accepted");
       const b = await socketOf(stack, await logIn(stack, "whitey"));
@@ -301,19 +307,19 @@ describe("TST-GACC-E2E accounts, game access, control, and play over PostgreSQL"
       await claimGranted(b, "claim-b");
       await a.next("control_revoked");
       const commits = stack.ga.runtime.repository.commits;
-      a.send(moveMessage("x-2", "X", 0, "e2e4"));
+      a.send(moveMessage("x-2", "X", 1, "e2e4"));
       const replayed = await response(a);
-      expect([field(replayed, "replayed"), field(replayed, "sequence")]).toEqual([true, 1]);
+      expect([field(replayed, "replayed"), field(replayed, "sequence")]).toEqual([true, 2]);
       expect(field(replayed, "clock")).toEqual(field(original, "clock"));
-      a.send(moveMessage("y-1", "Y", 1, "d2d4"));
+      a.send(moveMessage("y-1", "Y", 2, "d2d4"));
       expect(await failureCode(a)).toBe("CONTROL_NOT_HELD");
       expect(stack.ga.runtime.repository.commits).toBe(commits);
       const black = await socketOf(stack, await logIn(stack, "blacky"));
       await black.sync(GAME_ID);
       await claimGranted(black, "claim-k");
-      black.send(moveMessage("k-1", "K", 1, "e7e5"));
+      black.send(moveMessage("k-1", "K", 2, "e7e5"));
       expect(field(await response(black), "code")).toBe("Accepted");
-      b.send(moveMessage("y-2", "Y", 2, "d2d4"));
+      b.send(moveMessage("y-2", "Y", 3, "d2d4"));
       expect(field(await response(b), "code")).toBe("Accepted");
       const state = await storedState(stack.ga.runtime);
       expect(state.commandBindings.map((binding) => binding.clientCommandId)).toEqual([
@@ -333,11 +339,12 @@ describe("TST-GACC-E2E accounts, game access, control, and play over PostgreSQL"
       const blackId = await signUp(first, "Blacky");
       await signUp(first, "Mallory");
       await assign(first, whiteId, blackId);
+      await startFromOtherSessions(first, "whitey", "blacky");
       const cookieA = await logIn(first, "whitey");
       const blackCookie = await logIn(first, "blacky");
       const a = await socketOf(first, cookieA);
       await claimGranted(a, "claim-a");
-      a.send(moveMessage("x-1", "X", 0, "e2e4"));
+      a.send(moveMessage("x-1", "X", 1, "e2e4"));
       const original = await response(a);
       expect(field(original, "code")).toBe("Accepted");
       const cookieB = await logIn(first, "whitey");
@@ -355,38 +362,38 @@ describe("TST-GACC-E2E accounts, game access, control, and play over PostgreSQL"
         const durableBefore = await durableRows(schema);
         expect(durableBefore.bindings).toBe("1");
         const before = await storedState(restarted.ga.runtime);
-        a2.send(moveMessage("x-2", "X", 0, "e2e4"));
+        a2.send(moveMessage("x-2", "X", 1, "e2e4"));
         const replayed = await response(a2);
         if (typeof original !== "object" || original === null) throw new Error("no response");
         expect(replayed).toEqual({ ...original, replayed: true });
-        a2.send(moveMessage("x-3", "X", 0, "d2d4"));
+        a2.send(moveMessage("x-3", "X", 1, "d2d4"));
         expect(await failureCode(a2)).toBe("INVALID_COMMAND_IDENTITY");
-        a2.send(moveMessage("y-1", "Y", 1, "d2d4"));
+        a2.send(moveMessage("y-1", "Y", 2, "d2d4"));
         expect(await failureCode(a2)).toBe("CONTROL_NOT_HELD");
         const c = await socketOf(restarted, await logIn(restarted, "whitey"));
-        c.send(moveMessage("x-c", "X", 0, "e2e4"));
+        c.send(moveMessage("x-c", "X", 1, "e2e4"));
         expect(field(await response(c), "replayed")).toBe(true);
         const black = await socketOf(restarted, blackCookie);
-        black.send(moveMessage("x-k", "X", 0, "e2e4"));
+        black.send(moveMessage("x-k", "X", 1, "e2e4"));
         expect(await failureCode(black)).toBe("CONTROL_NOT_HELD");
         const mallory = await socketOf(restarted, await logIn(restarted, "mallory"));
-        mallory.send(moveMessage("x-m", "X", 0, "e2e4"));
+        mallory.send(moveMessage("x-m", "X", 1, "e2e4"));
         expect(await failureCode(mallory)).toBe("GAME_ACCESS_DENIED");
         for (const client of [black, mallory]) {
           expect(JSON.stringify(client.received)).not.toMatch(/"replayed"|"command_response"/);
         }
         const b2 = await socketOf(restarted, cookieB);
         expect(field(await b2.sync(GAME_ID), "snapshot", "controlHeld")).toBe(true);
-        b2.send(moveMessage("x-b", "X", 0, "e2e4"));
+        b2.send(moveMessage("x-b", "X", 1, "e2e4"));
         expect(await response(b2)).toEqual({ ...original, replayed: true });
-        b2.send(moveMessage("x-b-altered", "X", 0, "d2d4"));
+        b2.send(moveMessage("x-b-altered", "X", 1, "d2d4"));
         expect(await failureCode(b2)).toBe("INVALID_COMMAND_IDENTITY");
         expect(JSON.stringify(b2.received)).not.toMatch(/InvalidCommandIdentity/);
         expect(JSON.stringify(b2.received)).not.toMatch(/lease|fingerprint/i);
         await b2.close();
         expect(restarted.ga.runtime.repository.commits).toBe(0);
         const after = await storedState(restarted.ga.runtime);
-        expect(after.sequence).toBe(1);
+        expect(after.sequence).toBe(2);
         expect(after.commandBindings).toEqual(before.commandBindings);
         expect(after.clock).toEqual(before.clock);
         expect(await seatRows(schema)).toEqual(rowsBefore);
@@ -403,14 +410,15 @@ describe("TST-GACC-E2E accounts, game access, control, and play over PostgreSQL"
       const whiteId = await signUp(stack, "Whitey");
       const blackId = await signUp(stack, "Blacky");
       await assign(stack, whiteId, blackId);
+      await startFromOtherSessions(stack, "whitey", "blacky");
       const cookie = await logIn(stack, "whitey");
       const a = await socketOf(stack, cookie);
       await a.sync(GAME_ID);
       await claimGranted(a, "claim-a");
       const held = (await seatRows(schema)).white?.lease ?? "";
-      a.send(moveMessage("mv-1", "w-1", 0, "e2e4"));
+      a.send(moveMessage("mv-1", "w-1", 1, "e2e4"));
       const logout = logOut(stack, cookie);
-      a.send(moveMessage("mv-2", "w-2", 1, "d2d4"));
+      a.send(moveMessage("mv-2", "w-2", 2, "d2d4"));
       await logout;
       await a.closed;
       await stack.ga.access.settled();
@@ -419,7 +427,7 @@ describe("TST-GACC-E2E accounts, game access, control, and play over PostgreSQL"
       expect(rows.white?.lease).not.toBe(held);
       const state = await storedState(stack.ga.runtime);
       expect(state.controlLeases.white).toBe(rows.white?.lease);
-      expect(state.sequence).toBeLessThanOrEqual(1);
+      expect(state.sequence).toBeLessThanOrEqual(2);
       const bound = state.commandBindings.map((binding) => binding.clientCommandId);
       expect(["w-1", "w-2"]).toEqual(expect.arrayContaining(bound));
       const answers = a.received.filter((message) => field(message, "type") === "command_response");
@@ -442,10 +450,11 @@ describe("TST-GACC-E2E accounts, game access, control, and play over PostgreSQL"
       const whiteId = await signUp(stack, "Whitey");
       const blackId = await signUp(stack, "Blacky");
       await assign(stack, whiteId, blackId);
+      await startFromOtherSessions(stack, "whitey", "blacky");
       const a = await socketOf(stack, await logIn(stack, "whitey"));
       await a.sync(GAME_ID);
       await claimGranted(a, "claim-a");
-      a.send(moveMessage("mv-1", "w-1", 0, "e2e4"));
+      a.send(moveMessage("mv-1", "w-1", 1, "e2e4"));
       await stack.ga.accounts.accounts.setAccountStatus(userOf(whiteId), "locked");
       await a.closed;
       await stack.ga.access.settled();

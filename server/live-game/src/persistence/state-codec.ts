@@ -8,6 +8,7 @@ import {
 } from "@chess-one/chess-rules";
 import { err, type GameSequence, isGameSequence, ok, type Result } from "@chess-one/game-values";
 import type { ActiveGameState, CommandBinding, PendingDrawOffer } from "../active-game.ts";
+import { isAwaitingClock } from "../clock.ts";
 import { isCommandId, isControlLeaseId, isGameId, isPlayerId } from "../ids.ts";
 import { positionFacts, statusFromFacts } from "../result.ts";
 import {
@@ -24,17 +25,43 @@ import {
 import { decodeResponse, encodeResponse, readCanonicalFen } from "./response-codec.ts";
 import { decodeClock, decodeStatus, encodeClock, encodeStatus, isColor } from "./value-codec.ts";
 
-/** The one persisted format of `ActiveGameState`. A change needs a new version and a migration. */
-export const LIVE_GAME_STATE_FORMAT = "live_game_state.v1";
+/**
+ * The persisted format every write uses. `live_game_state.v2` is v1 plus the
+ * statuses of a game before its start (`awaiting_players`,
+ * `aborted_before_start`) and their stopped, unanchored clock; every v1
+ * state means the same in v2. A change needs a new version and a migration.
+ */
+export const LIVE_GAME_STATE_FORMAT = "live_game_state.v2";
 
 /**
- * `live_game_state.v1`: the aggregate without its command bindings, which are
- * stored one record each. Plain data only. `positionFen` restores the full
- * current position (halfmove, fullmove, raw en passant). `repetitionHistory`
- * holds the canonical repetition-key text of every committed position, from
- * the start position to the current one; it is never derived from a FEN.
+ * The historical format, still read with its original rules: an active,
+ * finished, or unresolved game only. A game written before v2 keeps its v1
+ * record until its next commit rewrites it, unchanged in meaning, as v2.
  */
-export interface LiveGameStateRecordV1 {
+export const LIVE_GAME_STATE_FORMAT_V1 = "live_game_state.v1";
+
+export type LiveGameStateFormat = typeof LIVE_GAME_STATE_FORMAT | typeof LIVE_GAME_STATE_FORMAT_V1;
+
+/**
+ * The format of one stored command binding. A binding exists only for a
+ * command decided in an active game, so its record did not change with the
+ * state's v2 and keeps the v1 name.
+ */
+export const COMMAND_BINDING_RECORD_FORMAT = "live_game_state.v1";
+
+export function isLiveGameStateFormat(value: unknown): value is LiveGameStateFormat {
+  return value === LIVE_GAME_STATE_FORMAT || value === LIVE_GAME_STATE_FORMAT_V1;
+}
+
+/**
+ * `live_game_state.v2` (and v1, with the same fields): the aggregate without
+ * its command bindings, which are stored one record each. Plain data only.
+ * `positionFen` restores the full current position (halfmove, fullmove, raw
+ * en passant). `repetitionHistory` holds the canonical repetition-key text of
+ * every committed position, from the start position to the current one; it
+ * is never derived from a FEN.
+ */
+export interface LiveGameStateRecord {
   readonly format: typeof LIVE_GAME_STATE_FORMAT;
   readonly gameId: string;
   readonly rulesetId: string;
@@ -89,7 +116,7 @@ const BINDING_FIELDS = [
   "response",
 ] as const;
 
-export function encodeGameState(state: ActiveGameState): LiveGameStateRecordV1 {
+export function encodeGameState(state: ActiveGameState): LiveGameStateRecord {
   const offer = state.pendingDrawOffer;
   return {
     format: LIVE_GAME_STATE_FORMAT,
@@ -213,6 +240,24 @@ function decodeBinding(value: unknown, path: string, expectedOrdinal: number): C
   return Object.freeze({ seat, clientCommandId, fingerprint, response });
 }
 
+/**
+ * A game before its start (awaiting, sequence 0) or one aborted instead of
+ * starting (sequence 1): the start position, the full balances on a stopped
+ * clock with no anchor, the first side to move marked active, and nothing
+ * decided: no binding, no offer.
+ */
+function checkPreGame(state: ActiveGameState, sequence: number): void {
+  const { clock, position } = state;
+  if (state.sequence !== sequence) corrupt("state.sequence", "not the pre-game sequence");
+  if (state.history.length !== 1) corrupt("state.repetitionHistory", "moves before the start");
+  if (!isAwaitingClock(clock)) corrupt("state.clock", "not the clock of an unstarted game");
+  if (clock.activeSide !== position.sideToMove) {
+    corrupt("state.clock.activeSide", "the first side to move is marked active");
+  }
+  if (state.lastDrawOfferMove !== null) corrupt("state.lastDrawOfferMove", "offer before start");
+  if (state.commandBindings.length > 0) corrupt("bindings", "a command bound before the start");
+}
+
 /** Cross-field invariants that every state produced by the live-game core satisfies. */
 function checkInvariants(state: ActiveGameState): void {
   const { status, clock, position, pendingDrawOffer: offer } = state;
@@ -220,6 +265,9 @@ function checkInvariants(state: ActiveGameState): void {
   if (state.players.white === state.players.black) corrupt("state.players", "same player twice");
   if (state.controlLeases.white === state.controlLeases.black) {
     corrupt("state.controlLeases", "shared control lease");
+  }
+  if (status.kind === "awaiting_players" || status.kind === "aborted_before_start") {
+    checkPreGame(state, status.kind === "awaiting_players" ? 0 : 1);
   }
   if (status.kind === "active") {
     if (!clock.running) corrupt("state.clock.running", "an active game has a running clock");
@@ -269,9 +317,8 @@ function checkInvariants(state: ActiveGameState): void {
 
 function decode(record: unknown, bindings: readonly unknown[]): ActiveGameState {
   const fields = readObject(record, "state", STATE_FIELDS);
-  if (field(fields, "format") !== LIVE_GAME_STATE_FORMAT) {
-    corrupt("state.format", "unknown serialization format");
-  }
+  const format = field(fields, "format");
+  if (!isLiveGameStateFormat(format)) corrupt("state.format", "unknown serialization format");
   const players = readObject(field(fields, "players"), "state.players", ["white", "black"]);
   const leases = readObject(field(fields, "controlLeases"), "state.controlLeases", [
     "white",
@@ -296,7 +343,11 @@ function decode(record: unknown, bindings: readonly unknown[]): ActiveGameState 
     history: decodeHistory(field(fields, "repetitionHistory"), position),
     sequence: readSequence(field(fields, "sequence"), "state.sequence"),
     clock: decodeClock(field(fields, "clock"), "state.clock"),
-    status: decodeStatus(field(fields, "status"), "state.status"),
+    status: decodeStatus(
+      field(fields, "status"),
+      "state.status",
+      format === LIVE_GAME_STATE_FORMAT,
+    ),
     pendingDrawOffer: readNullable(
       field(fields, "pendingDrawOffer"),
       "state.pendingDrawOffer",

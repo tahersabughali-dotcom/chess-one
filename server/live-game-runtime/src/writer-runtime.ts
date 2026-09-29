@@ -2,8 +2,11 @@ import { err } from "@chess-one/game-values";
 import {
   type ActiveGameState,
   type AuthorizedGameActor,
+  abortIfStartDeadlinePassed,
+  type CommitError,
   type CommitPlan,
   type ControlLeaseId,
+  commitLifecycle,
   type ExecutionError,
   executeCommand,
   executeDeadline,
@@ -14,6 +17,7 @@ import {
   historicalReplay,
   type LeaselessCommand,
   type LeaseRotationFailure,
+  type LifecycleDecision,
   type LiveGameCommand,
   type LiveGameRepository,
   type LiveGameWriter,
@@ -21,12 +25,14 @@ import {
   loadForWriter,
   type MonotonicMs,
   type Seat,
+  startAwaitingGame,
 } from "@chess-one/live-game";
 import { BoundedQueue } from "./bounded-queue.ts";
-import type { MonotonicClock, WakeHandle, WakeScheduler } from "./clock.ts";
+import type { MonotonicClock, WakeHandle, WakeScheduler, WallClock } from "./clock.ts";
 import { DeadlineWatch, lateInstant } from "./deadline-watch.ts";
 import type { FactSink, RetireReason, RuntimeFact } from "./facts.ts";
 import { type GameView, viewOf } from "./game-view.ts";
+import { ReadyMarks } from "./readiness.ts";
 import {
   type Activation,
   activationOf,
@@ -38,6 +44,11 @@ import {
   type GameSubscriber,
   type IngressRefused,
   type LeaseOutcome,
+  type NotInPlay,
+  type Readiness,
+  type ReadyOutcome,
+  type ReadyPresence,
+  type ReadyRefusal,
   type RecoveryRequired,
   type ReplayOutcome,
   type SubscribeResult,
@@ -83,12 +94,23 @@ type Job =
       readonly participant: GameParticipant;
       readonly command: LeaselessCommand;
       readonly reply: (outcome: ReplayOutcome) => void;
-    };
+    }
+  | {
+      readonly kind: "ready";
+      readonly seat: Seat;
+      readonly lease: ControlLeaseId;
+      readonly presence: ReadyPresence;
+      readonly reply: (outcome: ReadyOutcome) => void;
+    }
+  /** The start deadline of an awaiting game may have passed; uses the deadline check's slot. */
+  | { readonly kind: "start_deadline" };
 
 export interface WriterRuntimeOptions {
   readonly gameId: GameId;
   readonly writer: LiveGameWriter;
   readonly clock: MonotonicClock;
+  /** UTC wall clock for the start deadline of an awaiting game; nothing else reads it. */
+  readonly wallClock: WallClock;
   readonly scheduler: WakeScheduler;
   readonly limits: WriterLimits;
   readonly facts: FactSink<RuntimeFact>;
@@ -113,6 +135,13 @@ const IDENTITY_CONFLICT_OUTCOME: { readonly kind: "identity_conflict" } = Object
 });
 const APPLIED: LeaseOutcome = Object.freeze({ kind: "applied" });
 const SYNC_ACCEPTED: SyncIngress = Object.freeze({ accepted: true });
+const NOBODY_READY: Readiness = Object.freeze({ white: false, black: false });
+
+/** The lifecycle of a game not in play, or null for one that started. */
+function notInPlayOf(state: ActiveGameState | null): NotInPlay["lifecycle"] | null {
+  const kind = state?.status.kind;
+  return kind === "awaiting_players" || kind === "aborted_before_start" ? kind : null;
+}
 
 function unavailable(reason: UnavailableReason): Unavailable {
   return Object.freeze({ kind: "unavailable", reason });
@@ -161,6 +190,7 @@ export class GameWriterRuntime implements GameControlPort {
   readonly gameId: GameId;
   readonly #writer: LiveGameWriter;
   readonly #clock: MonotonicClock;
+  readonly #wallClock: WallClock;
   readonly #scheduler: WakeScheduler;
   readonly #limits: WriterLimits;
   readonly #facts: FactSink<RuntimeFact>;
@@ -204,6 +234,10 @@ export class GameWriterRuntime implements GameControlPort {
     Seat,
     { readonly lease: ControlLeaseId; readonly count: number }
   >();
+  /** Ready marks while the game awaits its players: memory only, at most one per seat. */
+  readonly #ready = new ReadyMarks();
+  /** The wake-up for the start deadline of an awaiting game, if armed. */
+  #startWake: WakeHandle | null = null;
 
   constructor(options: WriterRuntimeOptions) {
     this.gameId = options.gameId;
@@ -212,6 +246,7 @@ export class GameWriterRuntime implements GameControlPort {
       repository: this.#owned(options.writer.repository),
     });
     this.#clock = options.clock;
+    this.#wallClock = options.wallClock;
     this.#scheduler = options.scheduler;
     this.#limits = options.limits;
     this.#facts = options.facts;
@@ -241,6 +276,11 @@ export class GameWriterRuntime implements GameControlPort {
   /** True while a wake-up or a queued check waits for the running clock's deadline. */
   get deadlineArmed(): boolean {
     return this.#deadline.armed || this.#deadlineQueued;
+  }
+
+  /** True while a wake-up waits for the start deadline of an awaiting game. */
+  get startDeadlineArmed(): boolean {
+    return this.#startWake !== null;
   }
 
   /** The condition this writer serves, or null before its first load. */
@@ -288,6 +328,11 @@ export class GameWriterRuntime implements GameControlPort {
     if (lookup === null && this.#status === "active" && !this.#admits(actor, command)) {
       this.#facts.record({ name: "command_refused_control", gameId: this.gameId });
       return CONTROL_NOT_HELD;
+    }
+    const lifecycle = notInPlayOf(this.#known);
+    if (lookup === null && this.#status === "active" && lifecycle !== null) {
+      this.#facts.record({ name: "command_refused_not_started", gameId: this.gameId });
+      return Object.freeze({ accepted: false, reason: "not_in_play", lifecycle });
     }
     const refused = this.#refusal();
     if (refused !== null) return refused;
@@ -347,8 +392,35 @@ export class GameWriterRuntime implements GameControlPort {
     }
     const queued = this.#queuedRotations.get(seat);
     this.#queuedRotations.set(seat, { lease, count: (queued?.count ?? 0) + 1 });
+    this.#dropMark(seat, (markLease) => markLease !== lease, "control_changed");
     this.#enqueue({ kind: "lease", seat, lease, reply: once(reply) });
     return SYNC_ACCEPTED;
+  }
+
+  /**
+   * Queued like any request; decided on a fresh load at its turn. The game
+   * access layer calls it only after proving the session active, the account
+   * active, the seat the player's, and `lease` the session's control lease.
+   */
+  markReady(
+    seat: Seat,
+    lease: ControlLeaseId,
+    presence: ReadyPresence,
+    reply: (outcome: ReadyOutcome) => void,
+  ): SyncIngress {
+    const refused = this.#refusal();
+    if (refused !== null) return refused;
+    this.#enqueue({ kind: "ready", seat, lease, presence, reply: once(reply) });
+    return SYNC_ACCEPTED;
+  }
+
+  clearReady(seat: Seat, presence: ReadyPresence): void {
+    this.#dropMark(seat, (_lease, markPresence) => markPresence === presence, "connection_closed");
+  }
+
+  readiness(): Readiness {
+    if (this.#known?.status.kind !== "awaiting_players") return NOBODY_READY;
+    return this.#ready.readiness((seat, lease, presence) => this.#validMark(seat, lease, presence));
   }
 
   /**
@@ -379,6 +451,7 @@ export class GameWriterRuntime implements GameControlPort {
       this.#stopReason = "disposed";
       this.#status = "stopping";
       this.#deadline.disarm();
+      this.#cancelStartWake();
       this.#cancelIdle();
       if (!this.#busy) this.#stop();
     }
@@ -426,9 +499,33 @@ export class GameWriterRuntime implements GameControlPort {
    */
   #admits(actor: AuthorizedGameActor, command: LiveGameCommand): boolean {
     if (command.controlLeaseId !== actor.controlLeaseId) return false;
-    const tail =
-      this.#queuedRotations.get(actor.seat)?.lease ?? this.#known?.controlLeases[actor.seat];
-    return tail === actor.controlLeaseId;
+    return this.#tailLease(actor.seat) === actor.controlLeaseId;
+  }
+
+  /** The seat's lease at the end of the queue: the stored one with every queued rotation applied. */
+  #tailLease(seat: Seat): ControlLeaseId | undefined {
+    return this.#queuedRotations.get(seat)?.lease ?? this.#known?.controlLeases[seat];
+  }
+
+  /** A mark counts while its lease is still the seat's lease and its connection is open. */
+  #validMark(seat: Seat, lease: ControlLeaseId, presence: ReadyPresence): boolean {
+    return presence.open && this.#tailLease(seat) === lease;
+  }
+
+  #dropMark(
+    seat: Seat,
+    stale: (lease: ControlLeaseId, presence: ReadyPresence) => boolean,
+    cause: "connection_closed" | "control_changed",
+  ): void {
+    if (!this.#ready.clearIf(seat, stale)) return;
+    this.#facts.record({ name: "game_player_unready", gameId: this.gameId, seat, cause });
+    this.#readinessChanged();
+    this.#considerRetiring();
+  }
+
+  #readinessChanged(): void {
+    const readiness = this.readiness();
+    this.#notify((subscriber) => subscriber.onReadinessChanged?.(this.gameId, readiness));
   }
 
   /**
@@ -473,7 +570,7 @@ export class GameWriterRuntime implements GameControlPort {
 
   #enqueue(job: Job): void {
     if (!this.#queue.offer(job)) throw new Error("Writer runtime defect: reserved queue slot");
-    if (job.kind === "deadline") this.#deadlineQueued = true;
+    if (job.kind === "deadline" || job.kind === "start_deadline") this.#deadlineQueued = true;
     else this.#requests += 1;
     this.#wait(job, 1);
     this.#cancelIdle();
@@ -486,7 +583,7 @@ export class GameWriterRuntime implements GameControlPort {
   async #drain(): Promise<void> {
     try {
       for (let job = this.#queue.shift(); job !== undefined; job = this.#queue.shift()) {
-        if (job.kind === "deadline") this.#deadlineQueued = false;
+        if (job.kind === "deadline" || job.kind === "start_deadline") this.#deadlineQueued = false;
         if (this.#status !== "active") {
           this.#release(job, true);
           continue;
@@ -517,7 +614,7 @@ export class GameWriterRuntime implements GameControlPort {
    * `recovery_required` while play is paused, and anything else unavailable.
    */
   #release(job: Job, refuse: boolean): void {
-    if (job.kind === "deadline") return;
+    if (job.kind === "deadline" || job.kind === "start_deadline") return;
     this.#requests -= 1;
     this.#wait(job, -1);
     if (job.kind === "lease") this.#rotationLeft(job.seat);
@@ -537,14 +634,24 @@ export class GameWriterRuntime implements GameControlPort {
     }
     const paused = this.#condition?.kind === "infrastructure_paused" ? this.#condition : null;
     if (paused !== null) {
-      if (job.kind !== "deadline") job.reply(this.#recoveryRequired(paused.reason));
+      if (job.kind !== "deadline" && job.kind !== "start_deadline") {
+        job.reply(this.#recoveryRequired(paused.reason));
+      }
       return;
     }
     if (!this.#loaded && !(await this.#refresh(null))) {
-      if (job.kind !== "deadline") job.reply(this.#lastLoadFailure);
+      if (job.kind !== "deadline" && job.kind !== "start_deadline") {
+        job.reply(this.#lastLoadFailure);
+      }
       return;
     }
     switch (job.kind) {
+      case "ready":
+        await this.#runReady(job);
+        return;
+      case "start_deadline":
+        await this.#refresh(null, "wake");
+        return;
       case "command":
         await this.#runCommand(job);
         return;
@@ -571,7 +678,10 @@ export class GameWriterRuntime implements GameControlPort {
    * someone else, and a paused writer may only see its own commit whose
    * outcome the driver could not report land (one ahead, published).
    */
-  async #refresh(reply: ((outcome: SyncOutcome) => void) | null): Promise<boolean> {
+  async #refresh(
+    reply: ((outcome: SyncOutcome) => void) | null,
+    via: "load" | "wake" = "load",
+  ): Promise<boolean> {
     const loaded = await loadForWriter(this.#writer, this.gameId);
     if (!loaded.ok) {
       this.#lastLoadFailure = this.#loadFailed(loaded.error);
@@ -598,9 +708,119 @@ export class GameWriterRuntime implements GameControlPort {
       else this.#lastPublished = state.sequence;
     }
     this.#loaded = true;
+    const aborted =
+      condition.kind === "awaiting_players"
+        ? abortIfStartDeadlinePassed(state, this.#wallClock.now())
+        : null;
+    if (aborted !== null) {
+      const settled = await this.#commitLifecycle(
+        state,
+        { kind: "aborted", nextState: aborted },
+        via,
+      );
+      if (settled.kind !== "committed") {
+        this.#lastLoadFailure = settled.failure;
+        reply?.(settled.failure);
+        return false;
+      }
+      reply?.(Object.freeze({ kind: "snapshot", view: settled.view }));
+      return true;
+    }
     reply?.(Object.freeze({ kind: "snapshot", view }));
     this.#arm(state, condition);
     return true;
+  }
+
+  /**
+   * The writer's single linearization point of a start or an abort: the
+   * decision was made on the state this job just loaded, and the commit is a
+   * compare-and-set on its sequence. Committed, it clears every ready mark,
+   * publishes the new sequence to subscribers, and arms the running clock's
+   * deadline (a start) or nothing (an abort).
+   */
+  async #commitLifecycle(
+    state: ActiveGameState,
+    decision: LifecycleDecision,
+    via: "load" | "wake" | "ready",
+  ): Promise<
+    | { readonly kind: "committed"; readonly view: GameView; readonly started: boolean }
+    | { readonly kind: "failed"; readonly failure: RecoveryRequired | Unavailable }
+  > {
+    const committed = await commitLifecycle(this.#writer, state, decision);
+    if (!committed.ok) return { kind: "failed", failure: this.#executionFailed(committed.error) };
+    const next = committed.value;
+    this.#ready.clear();
+    const started = next.kind === "started";
+    if (started) this.#facts.record({ name: "game_started", gameId: this.gameId });
+    else this.#facts.record({ name: "game_start_aborted", gameId: this.gameId, via });
+    this.#adopt(next.state);
+    const condition = this.#condition ?? next.condition;
+    return { kind: "committed", view: viewOf(next.state, condition, this.#clock.now()), started };
+  }
+
+  /**
+   * The ready barrier, decided on a fresh load. A deadline already passed
+   * aborts the game instead. Otherwise the mark needs the game awaiting, the
+   * lease the seat's lease at the end of the queue, and the presence open;
+   * when both seats then hold a valid mark this job starts the game, with
+   * the first side's clock anchored at the monotonic reading taken here.
+   */
+  async #runReady(job: Extract<Job, { kind: "ready" }>): Promise<void> {
+    const loaded = await loadForWriter(this.#writer, this.gameId);
+    if (!loaded.ok) {
+      job.reply(this.#loadFailed(loaded.error));
+      return;
+    }
+    if (this.#foreignLoad()) {
+      job.reply(this.#ownershipConflict("load"));
+      return;
+    }
+    const { state, condition } = loaded.value;
+    const refuse = (reason: ReadyRefusal, view: GameView | null): void => {
+      this.#facts.record({ name: "game_ready_refused", gameId: this.gameId, reason });
+      job.reply(Object.freeze({ kind: "refused", reason, view }));
+    };
+    if (condition.kind !== "awaiting_players") {
+      refuse("game_not_awaiting", viewOf(state, condition, this.#clock.now()));
+      return;
+    }
+    const aborted = abortIfStartDeadlinePassed(state, this.#wallClock.now());
+    if (aborted !== null) {
+      const settled = await this.#commitLifecycle(
+        state,
+        { kind: "aborted", nextState: aborted },
+        "ready",
+      );
+      if (settled.kind === "committed") refuse("start_deadline_passed", settled.view);
+      else job.reply(settled.failure);
+      return;
+    }
+    const view = viewOf(state, condition, this.#clock.now());
+    if (this.#tailLease(job.seat) !== job.lease) {
+      refuse("control_not_held", view);
+      return;
+    }
+    if (!job.presence.open) {
+      refuse("connection_closed", view);
+      return;
+    }
+    if (this.#ready.mark(job.seat, job.lease, job.presence)) {
+      this.#facts.record({ name: "game_player_ready", gameId: this.gameId, seat: job.seat });
+      this.#readinessChanged();
+    }
+    const readiness = this.readiness();
+    if (!readiness.white || !readiness.black) {
+      job.reply(Object.freeze({ kind: "ready", readiness, view }));
+      return;
+    }
+    const decision = startAwaitingGame(state, this.#clock.now(), this.#wallClock.now());
+    const settled = await this.#commitLifecycle(state, decision, "ready");
+    if (settled.kind !== "committed") {
+      job.reply(settled.failure);
+      return;
+    }
+    if (settled.started) job.reply(Object.freeze({ kind: "started", view: settled.view }));
+    else refuse("start_deadline_passed", settled.view);
   }
 
   #loadFailed(error: LoadError): Unavailable | RecoveryRequired {
@@ -726,6 +946,12 @@ export class GameWriterRuntime implements GameControlPort {
       job.reply(NOT_HELD_OUTCOME);
       return;
     }
+    const lifecycle = notInPlayOf(state);
+    if (lifecycle !== null) {
+      this.#facts.record({ name: "command_refused_not_started", gameId: this.gameId });
+      job.reply(Object.freeze({ kind: "not_in_play", lifecycle }));
+      return;
+    }
     if (condition.kind === "running") {
       this.#facts.record({ name: "command_not_received", gameId: this.gameId });
       job.reply(unavailable("temporarily_unavailable"));
@@ -798,7 +1024,7 @@ export class GameWriterRuntime implements GameControlPort {
     if (this.#condition !== null) this.#arm(state, this.#condition);
   }
 
-  #executionFailed(error: ExecutionError): CommandOutcome {
+  #executionFailed(error: ExecutionError | CommitError): RecoveryRequired | Unavailable {
     switch (error.kind) {
       case "recovery_paused":
         this.#observe(error);
@@ -845,7 +1071,12 @@ export class GameWriterRuntime implements GameControlPort {
 
   #pausable(): boolean {
     const kind = this.#condition?.kind;
-    return kind === undefined || kind === "running" || kind === "infrastructure_paused";
+    return (
+      kind === undefined ||
+      kind === "running" ||
+      kind === "awaiting_players" ||
+      kind === "infrastructure_paused"
+    );
   }
 
   /**
@@ -856,6 +1087,8 @@ export class GameWriterRuntime implements GameControlPort {
     const entered = this.#pauses.add(this.gameId, reason);
     this.#condition = infrastructurePaused(this.#pauses.reasonOf(this.gameId) ?? reason);
     this.#deadline.disarm();
+    this.#cancelStartWake();
+    this.#ready.clear();
     if (!entered) return;
     this.#facts.record({ name: "infrastructure_pause_entered", gameId: this.gameId, reason });
     this.#notify((subscriber) => subscriber.onRecoveryRequired(this.gameId, reason));
@@ -896,6 +1129,7 @@ export class GameWriterRuntime implements GameControlPort {
    * the clock in time and arms again.
    */
   #arm(state: ActiveGameState, condition: WriterCondition): void {
+    this.#armStart(state, condition);
     if (condition.kind !== "running" || !state.clock.running || this.#status !== "active") {
       this.#deadline.disarm();
       return;
@@ -907,6 +1141,36 @@ export class GameWriterRuntime implements GameControlPort {
     if (this.#status !== "active" || this.#deadlineQueued) return;
     if (this.#condition?.kind === "infrastructure_paused") return;
     this.#enqueue({ kind: "deadline", observedAt: this.#clock.now() });
+  }
+
+  /**
+   * An awaiting game's start deadline is wall time. The wake only queues a
+   * reload, which aborts the game if the wall clock then reads the deadline
+   * or later; an early wake re-arms. Nothing else is armed while awaiting.
+   */
+  #armStart(state: ActiveGameState, condition: WriterCondition): void {
+    const { status } = state;
+    if (
+      condition.kind !== "awaiting_players" ||
+      status.kind !== "awaiting_players" ||
+      this.#status !== "active"
+    ) {
+      this.#cancelStartWake();
+      return;
+    }
+    if (this.#startWake !== null || this.#deadlineQueued) return;
+    const delay = status.startDeadlineAtWallMs - this.#wallClock.now();
+    this.#startWake = this.#scheduler.wakeAfter(Math.max(0, delay), () => {
+      this.#startWake = null;
+      if (this.#status !== "active" || this.#deadlineQueued) return;
+      if (this.#condition?.kind !== "awaiting_players") return;
+      this.#enqueue({ kind: "start_deadline" });
+    });
+  }
+
+  #cancelStartWake(): void {
+    this.#startWake?.cancel();
+    this.#startWake = null;
   }
 
   #cancelIdle(): void {
@@ -931,6 +1195,7 @@ export class GameWriterRuntime implements GameControlPort {
       !this.#busy &&
       this.#queue.size === 0 &&
       this.#subscribers.size === 0 &&
+      this.#ready.size === 0 &&
       this.#condition?.kind !== "running"
     );
   }
@@ -940,6 +1205,7 @@ export class GameWriterRuntime implements GameControlPort {
     this.#stopReason ??= reason;
     if (this.#status === "active") this.#status = "stopping";
     this.#deadline.disarm();
+    this.#cancelStartWake();
   }
 
   /**
@@ -950,6 +1216,8 @@ export class GameWriterRuntime implements GameControlPort {
     if (this.#status === "stopped") return;
     this.#status = "stopped";
     this.#deadline.disarm();
+    this.#cancelStartWake();
+    this.#ready.clear();
     this.#cancelIdle();
     for (let job = this.#queue.shift(); job !== undefined; job = this.#queue.shift()) {
       this.#release(job, true);

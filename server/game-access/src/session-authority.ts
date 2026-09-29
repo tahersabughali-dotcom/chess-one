@@ -1,9 +1,10 @@
 import type { AuthenticatedSession } from "@chess-one/accounts";
-import type { GameId, PlayerId, Seat } from "@chess-one/live-game-runtime";
+import type { GameId, PlayerId, ReadyPresence, Seat } from "@chess-one/live-game-runtime";
 import type {
   ClaimDecision,
   ControlNotice,
   GameAccessDecision,
+  ReadyDecision,
   ReplayAccess,
   SeatListing,
 } from "./values.ts";
@@ -20,6 +21,11 @@ export interface SessionGameAuthority {
   claim(gameId: GameId): Promise<ClaimDecision>;
   /** The session's seat for reading its historical command decisions; control is not needed. */
   replayAccess(gameId: GameId): Promise<ReplayAccess>;
+  /**
+   * The session declares its seat ready in a game awaiting its players, on
+   * the open connection `presence`. Needs the seat's control; never takes it.
+   */
+  ready(gameId: GameId, presence: ReadyPresence): Promise<ReadyDecision>;
   /**
    * Called whenever the seat changes hands in this process. Returns the
    * unsubscribe; a full registry returns a no-op and the edge relies on the

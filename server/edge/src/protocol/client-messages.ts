@@ -85,6 +85,12 @@ export type ClientMessage =
       readonly requestId: string | null;
       readonly gameId: GameId;
     }
+  /**
+   * The session declares its seat ready to begin a game awaiting its
+   * players, on this connection. Readiness lasts only while this connection
+   * stays open and the session keeps the seat's control.
+   */
+  | { readonly type: "ready_game"; readonly requestId: string | null; readonly gameId: GameId }
   | {
       readonly type: "game_command";
       readonly requestId: string | null;
@@ -293,7 +299,8 @@ function decodeMessage(members: JsonObject): ClientMessage {
       return { type, nonce: nonce ?? null };
     }
     case "sync_game":
-    case "claim_game_control": {
+    case "claim_game_control":
+    case "ready_game": {
       const fields = new Fields(members, ["type", "requestId", "gameId"]);
       return { type, requestId: fields.requestId(), gameId: fields.gameId("gameId") };
     }

@@ -1,5 +1,5 @@
 import { type Color, type DurationMs, isDurationMs } from "@chess-one/game-values";
-import { type ClockState, isMonotonicMs } from "../clock.ts";
+import { type ClockState, isMonotonicMs, isWallClockMs, type WallClockMs } from "../clock.ts";
 import type { DrawRuleDetail, GameResult, GameStatus, PositionFact } from "../result.ts";
 import {
   corrupt,
@@ -157,6 +157,14 @@ function decodeFact(value: unknown, path: string): PositionFact {
 
 export function encodeStatus(status: GameStatus): unknown {
   switch (status.kind) {
+    case "awaiting_players":
+      return { kind: status.kind, startDeadlineAtWallMs: status.startDeadlineAtWallMs };
+    case "aborted_before_start":
+      return {
+        kind: status.kind,
+        reason: status.reason,
+        startDeadlineAtWallMs: status.startDeadlineAtWallMs,
+      };
     case "active":
       return { kind: "active" };
     case "finished":
@@ -179,8 +187,42 @@ export function encodeStatus(status: GameStatus): unknown {
   }
 }
 
-export function decodeStatus(value: unknown, path: string): GameStatus {
+function readWallTime(value: unknown, path: string): WallClockMs {
+  const count = readCount(value, path);
+  return isWallClockMs(count) ? count : corrupt(path, "not a wall-clock instant");
+}
+
+/**
+ * `preGame` admits the statuses of a game before its start
+ * (`live_game_state.v2`). A `live_game_state.v1` record and every stored
+ * command response predate them and are read without it.
+ */
+export function decodeStatus(value: unknown, path: string, preGame: boolean): GameStatus {
   const kind = peek(value, path, "kind");
+  if (preGame && kind === "awaiting_players") {
+    const fields = readObject(value, path, ["kind", "startDeadlineAtWallMs"]);
+    return Object.freeze({
+      kind,
+      startDeadlineAtWallMs: readWallTime(
+        field(fields, "startDeadlineAtWallMs"),
+        `${path}.startDeadlineAtWallMs`,
+      ),
+    });
+  }
+  if (preGame && kind === "aborted_before_start") {
+    const fields = readObject(value, path, ["kind", "reason", "startDeadlineAtWallMs"]);
+    if (field(fields, "reason") !== "START_DEADLINE_PASSED") {
+      corrupt(`${path}.reason`, "unknown abort reason");
+    }
+    return Object.freeze({
+      kind,
+      reason: "START_DEADLINE_PASSED",
+      startDeadlineAtWallMs: readWallTime(
+        field(fields, "startDeadlineAtWallMs"),
+        `${path}.startDeadlineAtWallMs`,
+      ),
+    });
+  }
   if (kind === "active") {
     readObject(value, path, ["kind"]);
     return Object.freeze({ kind: "active" });

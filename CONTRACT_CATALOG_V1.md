@@ -537,3 +537,112 @@ Added in Phase 1 Batch 11 (2026-09-29), pending review; decisions GACC-001 to GA
 Games with players are created only by the internal `createAssignedGame(gameId, white, black, timeControl)`: both accounts exist, are different, and are active (a verified-email requirement exists as an unused hook, AUTH-EMAIL-VERIFIED-001). The assignment and the live game are created together or not at all as far as any caller can tell: an uncertain outcome is reported `creation_unconfirmed`, never success, and settled later by reconciliation. There is no public game-creation endpoint; matchmaking and challenges will call this use case (GAME-ACCESS-CREATION-API-001).
 
 المقعد من تعيين المباراة الدائم، والتحكم لجلسة واحدة لكل مقعد، وعقد التحكم سرّي على الخادم. الاستلام صريح عبر `claim_game_control` ويُدوّر العقد، والعقد القديم مرفوض من لحظة التدوير حتى لو لم يصل الإشعار. إنهاء الجلسة أو إغلاق الحساب يُسقط التحكم دون استسلام ودون نقله لجلسة أخرى.
+
+## 14. Direct challenges `/challenges` / التحديات المباشرة
+
+Added in Phase 1 Batch 12 (2026-09-29), local and pending review; decisions CHAL-001 to CHAL-015 in changelog section 26. Served by the realtime edge beside `/auth`, only when the edge is configured with authentication. Acceptance was added by Batch 12.1 (section 15).
+
+### 14.1 Request rules / قواعد الطلب
+
+- The session cookie of section 12.1 is the only credential; without a valid session every route is 401 `UNAUTHENTICATED` (a presented cookie is cleared).
+- The browser protections of section 12.2 apply unchanged: an allowlisted `Origin` on every non-GET request (403 `ORIGIN_NOT_ALLOWED`), `application/json` on every `POST` (415 `UNSUPPORTED_MEDIA_TYPE`), `Sec-Fetch-Site: cross-site` refused (403), no CORS headers.
+- Bodies: strict JSON (duplicate keys and malformed JSON are 400 `INVALID_REQUEST`), at most 1024 bytes (413 `PAYLOAD_TOO_LARGE`), depth 2, strings of at most 64 characters, at most 4 members, no arrays. Unknown members are 400 `INVALID_REQUEST`. No body member names a user id, role, or seat.
+
+### 14.2 Routes / المسارات
+
+| Route | Body or query | Success | Notes |
+|---|---|---|---|
+| `POST /challenges` | `opponentUsername`, `timeControl {type, initialMs, incrementMs}`, `seatPreference`, optional `rulesetId` | 201 `challenge.v1` | `type` `sudden_death`; `initialMs` 60 000 to 10 800 000, whole seconds; `incrementMs` 0 (LIVE-TIME-INCREMENT-001); `seatPreference` `white`, `black`, or `random`; `rulesetId` from the rules registry, default when omitted. The username is matched case-insensitively |
+| `GET /challenges?direction=incoming\|outgoing[&cursor][&limit]` | query only; unknown or repeated parameters are 400 | 200 `challenge_page.v1` | Pending, unexpired challenges only, newest first; `limit` 1 to 50 (default 20); `nextCursor` is opaque and null on the last page |
+| `GET /challenges/:challengeId` | none | 200 `challenge.v1` | Participants only; any status |
+| `POST /challenges/:challengeId/decline` | exactly `{}` | 200 `challenge.v1` (`declined`) | The challenged player only |
+| `POST /challenges/:challengeId/cancel` | exactly `{}` | 200 `challenge.v1` (`cancelled`) | The challenger only |
+
+Any other path or method under `/challenges` is 404 `NOT_FOUND`. `POST /challenges/:challengeId/accept` is section 15.4.
+
+Rules: a challenge expires 24 hours after creation; it can be acted on while the server's UTC time is before `expiresAt` and is expired from `expiresAt` on (`resolvedAt = expiresAt`). One pending challenge per pair of players in either direction; at most 20 outgoing and 100 incoming pending per user. Repeating the same decline or cancel returns the resolved challenge again (200, no change). A non-participant gets 404 `CHALLENGE_NOT_FOUND`, the same as for an unknown id.
+
+### 14.3 Wire formats / صيغ الرسائل
+
+- `challenge.v1`: `{ "format": "challenge.v1", "challenge": { "challengeId", "status", "viewerRole", "challenger": { "username" }, "challenged": { "username" }, "rulesetId", "timeControl": { "type", "initialMs", "incrementMs" }, "seatPreference", "createdAt", "expiresAt", "resolvedAt", "createdGameId" } }`. `challengeId` is 22 base64url characters. `status` is `pending`, `declined`, `cancelled`, `expired` (or `processing` for a reserved acceptance, or `accepted`; section 15). `viewerRole` is `challenger` or `challenged`. Times are UTC epoch milliseconds; `resolvedAt` and `createdGameId` are null when absent. Participants appear by username only: no user id, email, account status, session, lease, or token.
+- `challenge_page.v1`: `{ "format": "challenge_page.v1", "direction", "challenges": [ <challenge body> ], "nextCursor" }`.
+- `challenge_error.v1`: `{ "format": "challenge_error.v1", "code", "retryAfterMs"? }`. No error carries SQL, SQLSTATE, a table name, a user id, or a stack.
+
+| Status | Codes |
+|---|---|
+| 400 | `INVALID_REQUEST`, `INVALID_TIME_CONTROL`, `INVALID_SEAT_PREFERENCE`, `INVALID_RULESET`, `CANNOT_CHALLENGE_SELF` |
+| 401 | `UNAUTHENTICATED` |
+| 403 | `ACCOUNT_UNAVAILABLE` (the caller's account is not active), `NOT_CHALLENGE_PARTICIPANT` (a participant using the other role's action), `ORIGIN_NOT_ALLOWED` |
+| 404 | `PLAYER_NOT_FOUND`, `CHALLENGE_NOT_FOUND`, `NOT_FOUND` |
+| 409 | `PLAYER_UNAVAILABLE` (opponent not active, or its incoming limit reached), `CHALLENGE_ALREADY_PENDING`, `CHALLENGE_LIMIT_REACHED`, `CHALLENGE_NOT_PENDING`, `CHALLENGE_EXPIRED` |
+| 413, 415 | `PAYLOAD_TOO_LARGE`, `UNSUPPORTED_MEDIA_TYPE` |
+| 429 | `RATE_LIMITED` with `retryAfterMs` and `Retry-After` (10 creations at once, then one every 30 s per user, per process) |
+| 503 | `TEMPORARILY_UNAVAILABLE` with `Retry-After: 1` |
+
+### 14.4 Storage / التخزين
+
+Table `challenges` (migration `001_challenges`, with its own bookkeeping tables `challenges_schema_migrations` and `challenges_schema_migration_lock`). PostgreSQL enforces every invariant the domain checks: id format, distinct participants, status set, time-control bounds, `increment_ms = 0`, seat preference, `expires_at > created_at`, resolution times per status, `created_game_id` exactly when accepted, one pending row per unordered pair, one challenge per created game. Both user foreign keys are `ON DELETE RESTRICT`. A trigger refuses any update of a resolved row and any change to a pending row other than its resolution.
+
+التحدي بين حسابين نشطين باسم المستخدم، صالح 24 ساعة، ويُرفض أو يُلغى أو تنتهي صلاحيته. غير المشارك يرى 404 كأن التحدي غير موجود. لا يظهر في الرسائل إلا اسم المستخدم. قبول التحدي غير متاح حتى يُحسم وقت بدء ساعة المباراة.
+
+## 15. Game start lifecycle and challenge acceptance / دورة بدء المباراة وقبول التحدي
+
+Added in Phase 1 Batch 12.1 (2026-09-29), local and pending review; decisions GSL-001 to GSL-014 and CHAL-016 to CHAL-022 in changelog section 27. GAME-START-LIFECYCLE-001 is RESOLVED by the owner's decision: an accepted challenge creates a game awaiting its players with no clock running; both players claim control and explicitly declare ready; the game's writer then starts the game atomically, and White's clock runs from that instant.
+
+### 15.1 Lifecycle / دورة الحياة
+
+| `gameLifecycle` | Stored status | Sequence | Clock | A command |
+|---|---|---|---|---|
+| `awaiting_players` | `awaiting_players {startDeadlineAtWallMs}` | 0 | stopped, full balances | refused `GAME_NOT_STARTED` |
+| `in_progress` | `active` | 1 or more | running for the side to move | decided as before |
+| `ended` | `finished` or `unresolved` | any | stopped | decided as before |
+| `aborted_before_start` | `aborted_before_start {reason: START_DEADLINE_PASSED, startDeadlineAtWallMs}` | 1 | stopped, balances unchanged | refused `GAME_ABORTED_BEFORE_START` |
+
+- The start deadline is UTC wall time: the acceptance time plus 10 minutes, fixed in the challenge reservation and stored in the game. A game can start while `now < startDeadlineAt`; from `startDeadlineAt` on it is aborted.
+- The start and the abort are each one compare-and-set commit, sequence 0 to 1, by the game's writer. Each happens at most once, and never both.
+- An aborted game has no result, winner, loser, timeout, or rating effect.
+- Before the start, a command of any family (SubmitMove, ClaimDraw, ResignGame, OfferDraw, RespondDrawOffer) is refused at the writer's ingress before any clock reading. It gets no receipt time, binding, sequence, or clock effect. A command that reaches the core anyway is rejected `GameNotStarted` (after an abort, `GameAbortedBeforeStart`) with nothing bound.
+- After the start, a disconnect never pauses the game.
+- A restart before the start is not a recovery pause: the game stays `awaiting_players` in any clock domain, because a stopped clock is never read again. After the start, the existing `RECOVERY_PAUSED_CLOCK_DOMAIN_CHANGED` pause applies unchanged.
+- Stored as `live_game_state.v2` (migration `004_live_game_lifecycle`). v1 rows keep their meaning, and a v1 record never holds a pre-game status. Command bindings keep their format `live_game_state.v1`.
+
+### 15.2 Ready barrier / حاجز الجاهزية
+
+- Readiness is ephemeral: held by the game's writer only, never stored, at most one mark per seat.
+- A mark needs the session and the account active, the seat the player's, and this session holding the seat's control (its stored lease is applied to the writer first). The writer then decides at its turn, on a fresh load: the game still awaiting, the deadline not passed, the lease still the seat's lease, and the connection open.
+- A mark counts only while its lease is the seat's lease and its connection is open. It is cleared when the connection closes, when control moves (transfer, logout, revocation, or expiry), and by the start or the abort.
+- When both seats hold a valid mark, the writer job that made the second mark starts the game. No readiness or time comes from the client.
+
+### 15.3 Realtime protocol changes (`chess_one.realtime.v1`) / تغييرات البروتوكول
+
+- Client `ready_game {type, requestId, gameId}`. Strict: an unknown field is `UNKNOWN_FIELD`.
+- Server `game_ready_state {requestId, gameId, myReady, opponentReady, gameLifecycle}`: the answer to `ready_game` (`in_progress` for the ready that started the game), or a notice with `requestId` null when either seat's mark is made or cleared.
+- `game_snapshot.v2` replaces `game_snapshot.v1` (section 11.4). It adds `gameLifecycle`, `startDeadlineAt` (UTC epoch ms, null unless awaiting), `myReady`, `opponentReady` (both false unless awaiting), and `clock.initialMs`. `canClaimControl` is true while control is not held and the game is awaiting or in progress. `status` may be `awaiting_players` or `aborted_before_start`.
+- `request_failed` codes: `GAME_NOT_STARTED` and `GAME_ABORTED_BEFORE_START` for a command (never received). For `ready_game`: `CONTROL_NOT_HELD`, `GAME_NOT_AWAITING`, `START_DEADLINE_PASSED`, `SESSION_ENDED`, `GAME_ACCESS_DENIED`, and `TEMPORARILY_UNAVAILABLE`.
+
+### 15.4 `POST /challenges/:challengeId/accept`
+
+- The same session cookie, `Origin`, `Sec-Fetch-Site`, media type, body limits (exactly `{}`), headers, and error hygiene as the other challenge routes. Only the challenged player may accept: the challenger gets 403 `NOT_CHALLENGE_PARTICIPANT`, and anyone else gets 404 `CHALLENGE_NOT_FOUND`.
+- 200 `challenge_accept.v1`: `{ "format", "challenge": <challenge body: status accepted, createdGameId, viewerSeat>, "game": { "gameId", "viewerSeat", "lifecycle", "startDeadlineAt" } }`.
+- 202 `challenge_accept.v1` with challenge status `processing` and `game: null` while the game's existence is not proven. No game id is shown. A retry continues the same reserved game.
+- Repeating an accepted accept returns the same game (200). Refusals: 409 `CHALLENGE_NOT_PENDING`, `CHALLENGE_EXPIRED`, `PLAYER_UNAVAILABLE`, or `CHALLENGE_ACCEPT_FAILED` (Batch 12.2, section 15.6); 503 `TEMPORARILY_UNAVAILABLE`.
+- No user id, lease, session id, or database detail is returned. `challenge.v1` gains `viewerSeat` (null unless accepted) and shows a reserved acceptance as status `processing`, and a failed one as `accept_failed` (Batch 12.2).
+- Acceptance does not claim either seat: the game begins with no controller.
+
+### 15.5 Acceptance storage (`002_challenge_acceptance`) / تخزين القبول
+
+- Statuses `pending` to `accepting` to `accepted`. `accepting` reserves, once and immutably: `accepted_at`, `intended_game_id` (a 128-bit CSPRNG id), `white_user_id` and `black_user_id` (a `random` preference is drawn once with `node:crypto`), and `start_deadline_at = accepted_at + 10 minutes`.
+- `accepted` requires `created_game_id = intended_game_id`, written only after the game is proven to exist, and `resolved_at = accepted_at`. An accepting challenge never expires and cannot be declined or cancelled.
+- A trigger refuses `pending` straight to `accepted`, any change out of `accepting` other than to `accepted`, and any change of the reservation. A unique index allows one acceptance per game id.
+
+### 15.6 Acceptance recovery (`003_challenge_accept_failed`, Batch 12.2) / استعادة القبول
+
+- `accepting` ends as `accepted` or `accept_failed`. `accept_failed` is final: it keeps the whole reservation, has no created game, and `resolved_at >= accepted_at` (possibly after `expires_at`). It is never `declined`, `cancelled`, or `expired`.
+- An accept on an `accepting` challenge settles the same reservation (the same game id and seats, never new ones): 200 with the same game, 202 `processing`, or 409 `CHALLENGE_ACCEPT_FAILED`. An accept on an `accept_failed` challenge answers 409 `CHALLENGE_ACCEPT_FAILED` again; decline and cancel answer 409 `CHALLENGE_NOT_PENDING`. The body never names the cause (disabled, locked, a mismatched game, or any store detail).
+- `accept_failed` is reached only on proof: an account lost (or no longer eligible) before the game exists, or a stored game that differs from the reservation. An unknown game, an unreadable account, or a failed write stays `accepting`; no challenge fails for its age.
+- Trusted maintenance, not an HTTP route: `reconcileAcceptingChallenges(limit, after)`, limit 1 to 100, order `(accepted_at, challenge_id)` ascending, result `{ listed, examined, accepted, failed, processing, next }`.
+- Storage: `accept_failed` in the status, resolution, and reservation checks; the partial index `challenges_accepting_order`; the guard trigger allows `accepting` to `accepting`, `accepted`, or `accept_failed` only. A failed acceptance keeps its unique reserved game id even when a foreign game holds that id.
+
+ينتهي القبول المحجوز إما مقبولًا أو فاشلًا نهائيًا (`accept_failed`) مع بقاء الحجز كما هو، ولا يرى العميل إلا الرمز العام `CHALLENGE_ACCEPT_FAILED`. عدم اليقين يُبقي التحدي قيد القبول وقابلًا للإعادة.
+
+قبول التحدي يحجز أولًا (معرّف المباراة والمقاعد والمهلة ثابتة)، ثم تُنشأ المباراة بانتظار اللاعبين دون أي ساعة، ولا يصبح التحدي مقبولًا إلا بعد إثبات وجود المباراة. يستلم كل لاعب التحكم ويعلن جاهزيته صراحة، فيبدأ كاتب المباراة اللعب مرة واحدة وتبدأ ساعة الأبيض. إن لم يجهز اللاعبان قبل انقضاء عشر دقائق تُلغى المباراة دون نتيجة.

@@ -1,5 +1,11 @@
 import type { SessionId } from "@chess-one/accounts";
-import type { ControlLeaseId, GameId, PlayerId, Seat } from "@chess-one/live-game-runtime";
+import type {
+  ControlLeaseId,
+  GameId,
+  PlayerId,
+  Readiness,
+  Seat,
+} from "@chess-one/live-game-runtime";
 
 /**
  * The durable seat assignment of one game: exactly two different users,
@@ -80,7 +86,7 @@ export type ReplayAccess =
 export type ClaimRefusal =
   /** Not a player of this game, or no such game. */
   | "no_access"
-  /** The game is finished or stopped on an unresolved rules question. */
+  /** The game is finished, stopped on an unresolved rules question, or aborted before its start. */
   | "game_closed"
   | "session_ended"
   | "rate_limited"
@@ -90,6 +96,33 @@ export type ClaimRefusal =
 export type ClaimDecision =
   | { readonly kind: "granted"; readonly seat: Seat; readonly controlLeaseId: ControlLeaseId }
   | { readonly kind: "refused"; readonly reason: ClaimRefusal }
+  | { readonly kind: "unavailable" };
+
+/**
+ * - `no_access`: not a player of this game, or no such game;
+ * - `session_ended`: the session or the account is no longer active;
+ * - `control_not_held`: this session does not hold the seat's control;
+ * - `game_not_awaiting`: the game already started, was aborted, or ended;
+ * - `start_deadline_passed`: the deadline passed; the game is now aborted;
+ * - `connection_closed`: the connection closed before the mark was made.
+ */
+export type ReadyRefusal =
+  | "no_access"
+  | "session_ended"
+  | "control_not_held"
+  | "game_not_awaiting"
+  | "start_deadline_passed"
+  | "connection_closed";
+
+/**
+ * A ready request: `ready` (marked; the other seat is not ready yet),
+ * `started` (this mark completed the barrier and the writer started the
+ * game), a refusal, or `unavailable` (nothing was marked).
+ */
+export type ReadyDecision =
+  | { readonly kind: "ready"; readonly seat: Seat; readonly readiness: Readiness }
+  | { readonly kind: "started"; readonly seat: Seat }
+  | { readonly kind: "refused"; readonly reason: ReadyRefusal }
   | { readonly kind: "unavailable" };
 
 /** Why a seat lost its controller. Codes only; never a session id or lease. */

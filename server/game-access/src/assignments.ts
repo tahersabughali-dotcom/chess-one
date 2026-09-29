@@ -4,11 +4,14 @@ import {
   type Activation,
   type ControlDirectory,
   type GameId,
+  type GameView,
   isPlayerId,
   type PlayerId,
+  type RulesetId,
   type Seat,
   type SyncOutcome,
   type TimeControl,
+  type WallClockMs,
 } from "@chess-one/live-game-runtime";
 import type { GameAccessFactSink } from "./facts.ts";
 import { newControlLease } from "./leases.ts";
@@ -19,6 +22,13 @@ export interface AssignedGameRequest {
   readonly white: UserId;
   readonly black: UserId;
   readonly timeControl: TimeControl;
+  /** Absent: the live game's default ruleset. */
+  readonly rulesetId?: RulesetId;
+  /**
+   * UTC wall time from which the game, if not yet started, is aborted. The
+   * trusted caller derives it from its own record (a challenge's acceptance).
+   */
+  readonly startDeadlineAtWallMs: WallClockMs;
 }
 
 export interface AssignmentPolicy {
@@ -95,15 +105,16 @@ function standingRefusal(
 }
 
 /**
- * The trusted internal use case that creates a playable game between two
- * accounts (there is no public endpoint). Order, so a game never runs
- * without both players able to reach it:
+ * The trusted internal use case that creates a game between two accounts
+ * (there is no public endpoint). The game is created awaiting its players:
+ * no clock runs until both hold their seat's control and declare ready.
+ * Order, so a game never exists without both players able to reach it:
  *
  * 1. both accounts exist, differ, and are active (and verified, if required);
  * 2. the assignment and both seat-control rows, with fresh leases and no
  *    controller, in one transaction (pending);
- * 3. the live game, created and activated through the writer registry with
- *    the same players and leases;
+ * 3. the live game, created awaiting its players and activated through the
+ *    writer registry with the same players and leases;
  * 4. the assignment marked confirmed.
  *
  * The two stores are separate transactions, so the gap is closed by
@@ -140,11 +151,13 @@ export async function createAssignedGame(
   if (reserved === FAILED) return fail({ kind: "unavailable" });
   if (reserved === "already_assigned") return fail({ kind: "game_already_assigned" });
 
-  const started = await deps.writers.startGame({
+  const started = await deps.writers.createAwaitingGame({
     gameId,
     players,
     controlLeases: leases,
     timeControl: request.timeControl,
+    startDeadlineAtWallMs: request.startDeadlineAtWallMs,
+    ...(request.rulesetId === undefined ? {} : { rulesetId: request.rulesetId }),
   });
   if (started.ok) {
     if ((await attempt(deps, () => deps.store.confirmAssignment(gameId))) === FAILED) {
@@ -204,6 +217,71 @@ export async function reconcileAssignment(
   }
   deps.facts.record({ name: "game_assignment_reconciled", gameId, outcome });
   return outcome;
+}
+
+/**
+ * `matches`: the game exists in any lifecycle, its assignment is confirmed
+ * with exactly the requested players, and the live game has the requested
+ * initial time, ruleset (when one was requested), and start deadline (while
+ * the game still records one: awaiting its players or aborted before its
+ * start; a started game kept no deadline, and could only have started
+ * before it). `absent`: surely no game and no pending assignment under this
+ * id. `mismatch`: something else holds this id, including a live game with
+ * no assignment. `unknown`: not provable now.
+ */
+export type AssignedGameCheck = "matches" | "absent" | "mismatch" | "unknown";
+
+/**
+ * Settles a pending assignment first (`reconcileAssignment`), then compares
+ * what is stored with `request`. Nothing is created or changed beyond the
+ * reconciliation.
+ */
+export async function checkAssignedGame(
+  deps: AssignmentDeps,
+  request: AssignedGameRequest,
+): Promise<AssignedGameCheck> {
+  const { gameId } = request;
+  const reconciled = await reconcileAssignment(deps, gameId);
+  if (reconciled === "discarded") return "absent";
+  if (reconciled === "unknown") return "unknown";
+  if (reconciled === "none") {
+    const stored = await liveGameStored(deps.writers, gameId);
+    return stored === "stored" ? "mismatch" : stored;
+  }
+  const assignment = await attempt(deps, () => deps.store.findAssignment(gameId));
+  if (assignment === FAILED || assignment === null) return "unknown";
+  const { players } = assignment;
+  if (!sameId(players.white, request.white) || !sameId(players.black, request.black)) {
+    return "mismatch";
+  }
+  const view = await liveGameView(deps.writers, gameId);
+  if (view === null) return "unknown";
+  if (view.clock.initialMs !== request.timeControl.initialMs) return "mismatch";
+  if (request.rulesetId !== undefined && view.rulesetId !== request.rulesetId) return "mismatch";
+  const { status } = view;
+  if (
+    (status.kind === "awaiting_players" || status.kind === "aborted_before_start") &&
+    status.startDeadlineAtWallMs !== request.startDeadlineAtWallMs
+  ) {
+    return "mismatch";
+  }
+  return "matches";
+}
+
+/** A player id is its account's user id; the two brands name one value. */
+function sameId(playerId: string, userId: string): boolean {
+  return playerId === userId;
+}
+
+function liveGameView(writers: ControlDirectory, gameId: GameId): Promise<GameView | null> {
+  const writer = writers.acquire(gameId);
+  if (writer === null) return Promise.resolve(null);
+  const done = Promise.withResolvers<GameView | null>();
+  const ingress = writer.requestSync((outcome: SyncOutcome) =>
+    done.resolve(outcome.kind === "snapshot" ? outcome.view : null),
+  );
+  if (!ingress.accepted) done.resolve(null);
+  return done.promise;
 }
 
 /**

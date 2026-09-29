@@ -29,6 +29,8 @@ export interface GameView {
  * stored balances of the last durable state.
  */
 export interface ClockView {
+  /** Each side's budget at the start (sudden death). */
+  readonly initialMs: number;
   readonly remainingMs: Readonly<Record<Color, number>>;
   readonly activeSide: Color;
   readonly running: boolean;
@@ -53,6 +55,7 @@ function clockView(
     remaining[clock.activeSide] = Math.max(0, live);
   }
   return Object.freeze({
+    initialMs: clock.timeControl.initialMs,
     remainingMs: Object.freeze(remaining),
     activeSide: clock.activeSide,
     running,

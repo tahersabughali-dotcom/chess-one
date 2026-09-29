@@ -6,6 +6,7 @@ import {
   type RepetitionKey,
 } from "@chess-one/chess-rules";
 import type { Color } from "@chess-one/game-values";
+import type { WallClockMs } from "./clock.ts";
 
 /** Engineering draw details of the default ruleset (CONTRACT_CATALOG_V1 section 5). */
 export type DrawRuleDetail =
@@ -51,6 +52,10 @@ export type PositionFact =
   | { readonly kind: "stalemate" | "fivefold" | "seventy_five_move" | "dead_position" };
 
 /**
+ * `awaiting_players` is a created game before its start: no clock runs and no
+ * command is accepted until both players are ready and the writer starts it.
+ * `aborted_before_start` is a game that never started because its start
+ * deadline passed: no result, no winner, no rating effect.
  * `active` accepts commands. `finished` holds an immutable committed result.
  * `unresolved` stops play without an official result:
  * - MATING_POSSIBILITY_UNRESOLVED: a flag or a resignation whose outcome
@@ -59,6 +64,12 @@ export type PositionFact =
  * - TERMINAL_PRECEDENCE_UNRESOLVED: facts whose precedence is not approved.
  */
 export type GameStatus =
+  | { readonly kind: "awaiting_players"; readonly startDeadlineAtWallMs: WallClockMs }
+  | {
+      readonly kind: "aborted_before_start";
+      readonly reason: "START_DEADLINE_PASSED";
+      readonly startDeadlineAtWallMs: WallClockMs;
+    }
   | { readonly kind: "active" }
   | { readonly kind: "finished"; readonly result: GameResult }
   | {
@@ -78,6 +89,25 @@ export type GameStatus =
     };
 
 export const ACTIVE: GameStatus = Object.freeze({ kind: "active" });
+
+/**
+ * The coarse lifecycle a client sees. `in_progress` is the active game;
+ * `ended` is a finished or unresolved one (play stopped after the start).
+ */
+export type GameLifecycle = "awaiting_players" | "in_progress" | "ended" | "aborted_before_start";
+
+export function lifecycleOf(status: GameStatus): GameLifecycle {
+  switch (status.kind) {
+    case "awaiting_players":
+    case "aborted_before_start":
+      return status.kind;
+    case "active":
+      return "in_progress";
+    case "finished":
+    case "unresolved":
+      return "ended";
+  }
+}
 
 /** Existing chess-rules facts for `position`, the last entry of `history`, in a fixed order. */
 export function positionFacts(

@@ -1,4 +1,5 @@
 import type { GameId, ResponseCode, Seat } from "@chess-one/live-game";
+import type { ReadyRefusal } from "./writer-port.ts";
 import type { InfrastructureReason } from "./writer-recovery.ts";
 
 /**
@@ -49,11 +50,40 @@ export type RuntimeFact =
   /** A lookup found its id unbound while the clock runs: never received; it may be sent again. */
   | { readonly name: "command_not_received"; readonly gameId: GameId }
   | { readonly name: "deadline_flagged"; readonly gameId: GameId }
+  /** A game created to await its players; no clock runs. */
+  | { readonly name: "game_awaiting_players"; readonly gameId: GameId }
+  | { readonly name: "game_player_ready"; readonly gameId: GameId; readonly seat: Seat }
+  | {
+      readonly name: "game_player_unready";
+      readonly gameId: GameId;
+      readonly seat: Seat;
+      readonly cause: "connection_closed" | "control_changed";
+    }
+  | { readonly name: "game_ready_refused"; readonly gameId: GameId; readonly reason: ReadyRefusal }
+  | { readonly name: "game_started"; readonly gameId: GameId }
+  | {
+      readonly name: "game_start_aborted";
+      readonly gameId: GameId;
+      readonly via: "load" | "ready" | "wake";
+    }
+  /** The index of overdue awaiting games could not be read; nothing was swept. */
+  | { readonly name: "awaiting_sweep_failed" }
+  /** A new command refused before its receipt: the game is not in play. */
+  | { readonly name: "command_refused_not_started"; readonly gameId: GameId }
   | {
       /** An unexpected exception inside the writer; the error itself goes to `reportDefect` only. */
       readonly name: "writer_fault";
       readonly gameId: GameId;
-      readonly job: "command" | "lookup" | "sync" | "deadline" | "lease" | "replay" | "none";
+      readonly job:
+        | "command"
+        | "lookup"
+        | "sync"
+        | "deadline"
+        | "lease"
+        | "replay"
+        | "ready"
+        | "start_deadline"
+        | "none";
     }
   | { readonly name: "subscriber_defect"; readonly gameId: GameId };
 
