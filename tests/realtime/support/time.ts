@@ -9,12 +9,15 @@ import { ms } from "../../live-game/support/harness.ts";
 /** A writer clock the test sets by hand. It never goes backwards. */
 export class ManualClock implements MonotonicClock {
   #now: number;
+  /** Readings taken so far, so a test can prove a path read no clock. */
+  reads = 0;
 
   constructor(start: number) {
     this.#now = start;
   }
 
   now(): MonotonicMs {
+    this.reads += 1;
     return ms(this.#now);
   }
 

@@ -32,7 +32,14 @@ import {
   SteppingClock,
   TOKENS,
 } from "./support/edge.ts";
-import { DOMAIN_OLD, IDLE_MS, runtimeHarness, store, storedState } from "./support/runtime.ts";
+import {
+  DOMAIN_OLD,
+  IDLE_MS,
+  runtimeHarness,
+  store,
+  storedState,
+  storeInPlay,
+} from "./support/runtime.ts";
 import { staticSession } from "./support/static-access.ts";
 
 const harnesses: EdgeHarness[] = [];
@@ -618,7 +625,7 @@ describe("TST-EDGE live play over WebSocket", () => {
     });
 
     const late = await start({ runtime: runtimeHarness() });
-    await store(late.runtime, newGame({ initialMs: 5_000 }));
+    await storeInPlay(late.runtime, newGame({ initialMs: 5_000 }));
     const lateWhite = await ready(late.url, TOKENS.white);
     late.runtime.clock.set(START_MS + 5_001);
     lateWhite.send(commandMessage(moveCommand(s0, "e2e4")));
@@ -749,6 +756,7 @@ describe("TST-EDGE failures reach the client as retryable refusals, never as fal
     const other = runtimeHarness({}, contract);
     const s0 = newGame();
     await store(h.runtime, s0);
+    await other.registry.activate(GAME_ID);
     const { white, black } = await players(h);
     const foreign = moveCommand(s0, "d2d4");
     h.runtime.repository.beforeCommit = async () => {
@@ -958,7 +966,8 @@ describe("TST-EDGE flow control", () => {
         clientCommandId: null,
       },
     ]);
-    expect(h.facts.count("command_submitted")).toBe(3);
+    expect(h.facts.count("command_submitted")).toBe(1);
+    expect(h.facts.count("command_lookup")).toBe(2);
     expect(field(await black.sync(GAME_ID, "after"), "snapshot", "sequence")).toBe(1);
     expect(h.runtime.repository.loads - loadsBefore).toBe(4);
     expect(h.runtime.repository.commits).toBe(1);

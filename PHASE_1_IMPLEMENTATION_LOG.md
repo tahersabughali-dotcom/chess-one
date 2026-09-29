@@ -2276,7 +2276,7 @@ The fingerprint of a bound command includes the control lease it was admitted un
 - **Writer.** `replayCommand(participant, command, reply)` takes a `GameParticipant` (game, player, seat; no lease) and a `LeaselessCommand`, queues a read-only job, loads the stored game (`loadForWriter`), and runs `historicalReplay`. Outcomes: `decided` (fact `command_replayed`), `control_not_held` (`command_refused_control`), `identity_conflict` (new fact `replay_identity_conflict`), `recovery_required`, `unavailable`. It never stamps, decides, commits, or schedules.
 - **Edge.** `connection.ts` sends a command without control, or one the writer refuses `control_not_held` (at ingress or from a cold writer), to `#historical`: `replayAccess`, then the writer's `replayCommand` with the seat game access returned. Mapping: `decided` → `command_response` (`replayed: true`); `control_not_held` or `session_ended` → `CONTROL_NOT_HELD`; `identity_conflict` → `request_failed INVALID_COMMAND_IDENTITY` (not retryable); `denied` → `GAME_ACCESS_DENIED`; `unavailable` → `TEMPORARILY_UNAVAILABLE`. `seat-control.ts` no longer remembers sent ids or former leases (`REMEMBERED_COMMANDS`, `rememberSent`, `replayLease` removed). `ClientCommand` is now the runtime's `LeaselessCommand`.
 - **Connection memory is no longer authoritative, or used at all, for replay.** The only authority is the stored binding.
-- **Current controller (GACC-016).** Unchanged: a controller under a newer lease resending an id bound under an earlier lease gets `InvalidCommandIdentity` from the core (catalog 2.6.2). Recorded as an owner review point.
+- **Current controller (GACC-016; superseded by Batch 11.2, which resolved it).** Unchanged: a controller under a newer lease resending an id bound under an earlier lease gets `InvalidCommandIdentity` from the core (catalog 2.6.2). Recorded as an owner review point.
 - **Cost.** A command without control costs one assignment read, one session read, and one read-only writer job (a game load), bounded by the connection's inbound token bucket and the writer's queue limit.
 
 ### Files
@@ -2307,6 +2307,99 @@ The fingerprint of a bound command includes the control lease it was admitted un
 ### Resolved and remaining
 
 - **Resolved:** GAME-CONTROL-REPLAY-RECONNECT-001.
-- **Owner review point:** GACC-016 (the current controller stays under LIVE-CONTRACT-005).
+- **Owner review point:** GACC-016 (the current controller stays under LIVE-CONTRACT-005). Resolved by Batch 11.2.
 - **New, narrow:** LIVE-RECOVERY-PAUSED-REPLAY-001 (a writer paused for an infrastructure failure answers a replay `recovery_required`).
 - **Unchanged:** every Batch 11 gap other than the one resolved; binding retention (LIVE-PERSIST-003) bounds how far back replay reaches.
+
+## PHASE 1 / BATCH 11.2 — UNIFY HISTORICAL COMMAND REPLAY ACROSS CONTROL STATES
+
+Owner-authorized (2026-09-29). Local only: no commit, no push, no deployment, no change to the remote, CI/CD (the repository has none), DNS, the site, or any credential. Batch 11 and 11.1 had been committed and pushed at the owner's request just before (`ff656fa`), so HEAD is `ff656fa`; the batch brief's expected HEAD `53d85e2` no longer matches, and history was not rewritten. Changelog section 24.
+
+### Problem
+
+After Batch 11.1 a session without control replayed an exact old command, but the session that controls the seat under a newer lease got `InvalidCommandIdentity` for the same resend, because the core's identity step compared the stored fingerprint with one built under the caller's current lease.
+
+### Change
+
+- `command-identity.ts`: `matchesBinding(binding, command)` rebuilds the command's fingerprint under the lease stored in the binding (`boundLease`) and requires exact equality with the stored text.
+- `process-command.ts` step 3 uses `matchesBinding` instead of comparing with the current-lease fingerprint; a new command's fingerprint is still built under the current lease (after the unchanged lease check of step 2).
+- `control-lease.ts`: `historicalReplay` uses the same `matchesBinding`, so the controller path and the historical path apply one rule.
+- No edge, runtime, game-access, persistence, protocol, or schema change: a controller's resend was already admitted under its current lease and reaches step 3; a command not admitted under the current lease already goes to the historical lookup of Batch 11.1.
+
+### Rule
+
+For any active session of the seat's assigned player: binding for (game, own seat, command id) first; exact match under the stored lease → stored response, `replayed: true`, nothing admitted or written; other command under that id → `InvalidCommandIdentity` (a `command_response` for the controller, `request_failed INVALID_COMMAND_IDENTITY` for a session without control); no binding → `CONTROL_NOT_HELD` without control, the normal path with control. The current lease authorizes new commands only; an old lease never does.
+
+### Tests
+
+- Rewritten: TST-LIVE-100 (controller under a replacement lease replays the old command; altered payload conflicts; the old lease is still `Unauthorized`), TST-GACC-EDGE-013 (B, C, D: current controller exact replay, altered → `InvalidCommandIdentity`, then a new command `Accepted` and bound; stored state, commits, and wakes unchanged across the replays; no lease or fingerprint on the wire).
+- New: TST-GACC-CORE-011 (bindings made under leases A and B both replay under lease C; the new binding carries the then-current lease), TST-GACC-RT-009 (controller replay through `submitCommand` with the clock advanced: stored state, commits, wakes unchanged; altered → `InvalidCommandIdentity`).
+- Extended: TST-GACC-E2E-007 (I, J: after a restart in the same and in a new clock domain the current controller replays X and gets `InvalidCommandIdentity` for altered X; the `live_games` row, binding and outbox counts, seat rows, sequence, bindings, and clock are unchanged; no commit).
+- Unchanged and still passing: A (TST-GACC-EDGE-004), E and F (TST-GACC-EDGE-011), G and H (TST-GACC-EDGE-012), same-session reconnect (TST-GACC-EDGE-010).
+
+### Gates (Node 24.21.0, pnpm 12.7.0, TypeScript 7.0.2, PostgreSQL 18, database `chess_one_test`)
+
+- typecheck, lint, format:check, check:boundaries, test, test:rules, check, audit, test:db, test:realtime, test:auth, and test:game-access all pass (exit 0), run one at a time.
+- **Normal suite:** 61 files, 761 passed. **`test:game-access`:** 6 files, 76 passed. **`test:db`:** 6 files, 52 passed. **`test:realtime`:** 9 files, 101 passed. **`test:auth`:** 8 files, 121 passed. **`test:rules`:** 24 files, 291 passed.
+- 0 failed, 0 skipped, 0 blocked, 0 todo. **Audit:** no known vulnerabilities. No dependency added. No `any`, cast, `as const`, `ts-ignore`, `ts-expect-error`, `biome-ignore`, or silent catch added.
+
+### Status
+
+GACC-016 RESOLVED; LIVE-CONTRACT-005 amended; GAME-CONTROL-REPLAY-RECONNECT-001 stays RESOLVED (no connection memory reintroduced); LIVE-RECOVERY-PAUSED-REPLAY-001 stays OPEN.
+
+## PHASE 1 / BATCH 11.3 — REMOVE AUTHORITATIVE RECEIPT FROM CURRENT-CONTROLLER HISTORICAL REPLAY
+
+Owner-authorized (2026-09-29). Local only, on top of the uncommitted Batch 11.2: no commit, no push, no deployment, no change to the remote, DNS, the site, or any credential. HEAD stays `ff656fa`. Changelog section 25 (GACC-017).
+
+### Root cause
+
+A session without control replayed through the writer's read-only `replayCommand`. The controller's resend went through `submitCommand`, which read the writer's monotonic clock as the authoritative `received_at` (DEC-063) and queued the resend as a new command before any binding was known. The core found the binding only later. So the controller's historical replay was an authoritative receipt, and its identity conflict came back as a `command_response` stamped with a new receipt time.
+
+### Change
+
+- `server/live-game-runtime/src/writer-runtime.ts`:
+  - The writer keeps `#known`, the game state it last loaded (every `loadGame`) or committed itself (every successful commit, including bind-only). This replaces the lease-only memory. It also keeps `#waiting`, a count of queued command and lookup jobs per seat and command id.
+  - `submitCommand` classifies each command at ingress with no database read and no clock reading, and in each case a replay is never received:
+    - id bound in `#known`: a `bound` lookup;
+    - `#known` absent, or a queued job may still bind the id: an `unresolved` lookup;
+    - otherwise a new command, authorized against the current lease (`CONTROL_NOT_HELD` if refused) and stamped at once.
+  - A new `lookup` job, run in queue order on a fresh load:
+    - bound id: replayed (`command_replayed`) or identity conflict (`replay_identity_conflict`);
+    - unbound id without control: `control_not_held`;
+    - unbound id with control on a game whose clock runs in this domain: not received (`command_not_received`, `temporarily_unavailable`);
+    - otherwise received after the load and processed normally, charging nothing because no clock runs.
+- `writer-port.ts`: `CommandIngress` gains `CommandLookup` (`receivedAt: null`, `lookup: "bound" | "unresolved"`); `CommandOutcome` gains `identity_conflict`. `facts.ts`: `command_not_received`; `writer_fault.job` includes `lookup`.
+- `server/edge/src/connection.ts`: a lookup records `command_lookup`, and only a stamped command records `command_submitted`. `identity_conflict` is sent as `request_failed INVALID_COMMAND_IDENTITY`, the same answer a session without control gets.
+- No change to the live-game core, game-access, persistence, schema, protocol message set, or dependencies.
+
+### First load and restart
+
+- An unloaded writer never stamps and never treats an id as new. A bound id is replayed from the fresh load. A new id on a game whose clock runs here is not received (resend). When no clock runs here, it is received after the load, which costs nothing.
+- In production a running game enters play through `startGame`, which loads its writer before returning (LIVE-WRITER-ACTIVATION-001), and a running writer never retires (TST-RT-016). So every command to a running game meets a loaded writer and is stamped immediately (TST-GACC-RCPT-006).
+- A restarted process is a new clock domain, so the games it finds are recovery-paused. There, a bound id is a lookup (TST-GACC-RCPT-005), and a new id gets `recovery_required` (TST-GACC-RCPT-007).
+
+### Tests
+
+- New, TST-GACC-RCPT-001 to 008, covering required cases A to G. `ManualClock.reads` counts clock readings deterministically; there are no timing races.
+- Updated:
+  - TST-GACC-RT-003, 009 and TST-GACC-EDGE-013 (the controller's conflict is `request_failed INVALID_COMMAND_IDENTITY` with no clock reading and no `command_submitted`);
+  - TST-GACC-E2E-007 (same over PostgreSQL);
+  - TST-RT-004 (an in-flight duplicate is an `unresolved` lookup) and TST-EDGE-041 (facts).
+- Test setup: tests that stored a running game in the current clock domain and then sent commands to a writer that had never loaded it now activate the writer first (`storeInPlay`), as `startGame` does. This covers writer-runtime, writer-ownership, infrastructure-pause, writer-activation, edge, runtime-control, and realtime.db (TST-RT-DB-005's second process). Without that step, those tests would now get the fail-safe answer.
+
+### Gates (Node 24, pnpm 12.7.0, TypeScript 7.0.2, PostgreSQL 18, database `chess_one_test`)
+
+- All 12 gates pass (exit 0), run one at a time: typecheck, lint, format:check, check:boundaries (251 files), test, test:rules, check, audit, test:db, test:realtime, test:auth, and test:game-access.
+- Test counts:
+  - Normal suite: 61 files, 769 passed.
+  - `test:game-access`: 6 files, 84 passed.
+  - `test:db`: 6 files, 52 passed.
+  - `test:realtime`: 9 files, 101 passed.
+  - `test:auth`: 8 files, 121 passed.
+  - `test:rules`: 24 files, 291 passed.
+- 0 failed, 0 skipped, 0 blocked, 0 todo.
+- Audit: no known vulnerabilities. No dependency added. No `any`, cast, `as const`, `ts-ignore`, `ts-expect-error`, `biome-ignore`, or silent catch added.
+
+### Status
+
+GACC-017 RESOLVED (pending review). GACC-016 and GAME-CONTROL-REPLAY-RECONNECT-001 stay RESOLVED. LIVE-CONTRACT-005 is not amended again. LIVE-RECOVERY-PAUSED-REPLAY-001 stays OPEN.

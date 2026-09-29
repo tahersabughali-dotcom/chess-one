@@ -340,7 +340,8 @@ describe("TST-GACC-E2E accounts, game access, control, and play over PostgreSQL"
       a.send(moveMessage("x-1", "X", 0, "e2e4"));
       const original = await response(a);
       expect(field(original, "code")).toBe("Accepted");
-      const b = await socketOf(first, await logIn(first, "whitey"));
+      const cookieB = await logIn(first, "whitey");
+      const b = await socketOf(first, cookieB);
       await claimGranted(b, "claim-b");
       await a.next("control_revoked");
       await closeAll(a, b);
@@ -374,6 +375,15 @@ describe("TST-GACC-E2E accounts, game access, control, and play over PostgreSQL"
         for (const client of [black, mallory]) {
           expect(JSON.stringify(client.received)).not.toMatch(/"replayed"|"command_response"/);
         }
+        const b2 = await socketOf(restarted, cookieB);
+        expect(field(await b2.sync(GAME_ID), "snapshot", "controlHeld")).toBe(true);
+        b2.send(moveMessage("x-b", "X", 0, "e2e4"));
+        expect(await response(b2)).toEqual({ ...original, replayed: true });
+        b2.send(moveMessage("x-b-altered", "X", 0, "d2d4"));
+        expect(await failureCode(b2)).toBe("INVALID_COMMAND_IDENTITY");
+        expect(JSON.stringify(b2.received)).not.toMatch(/InvalidCommandIdentity/);
+        expect(JSON.stringify(b2.received)).not.toMatch(/lease|fingerprint/i);
+        await b2.close();
         expect(restarted.ga.runtime.repository.commits).toBe(0);
         const after = await storedState(restarted.ga.runtime);
         expect(after.sequence).toBe(1);

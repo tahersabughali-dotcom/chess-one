@@ -383,6 +383,7 @@ describe("TST-RT-DB realtime over PostgreSQL", () => {
       const other = runtimeHarness({}, new PostgresLiveGameRepository(schema.pool()));
       try {
         const s0 = await started(stack);
+        expect((await other.registry.activate(GAME_ID)).kind).not.toBe("unavailable");
         const white = await ready(stack.edge.url, TOKENS.white);
         const black = await ready(stack.edge.url, TOKENS.black);
         await white.sync(GAME_ID);

@@ -77,6 +77,19 @@ export async function store(
   if (!created.ok) throw new Error(`game not stored: ${created.error.kind}`);
 }
 
+/**
+ * Stores `state` as a game that entered play in this process: its writer is
+ * activated, as `startGame` does (LIVE-WRITER-ACTIVATION-001), so it has
+ * loaded the game before any command can reach it. `store` alone leaves a
+ * writer that has not loaded the game, which only a restart or a writer that
+ * stopped can leave in production.
+ */
+export async function storeInPlay(harness: RuntimeHarness, state: ActiveGameState): Promise<void> {
+  await store(harness, state);
+  const activation = await harness.registry.activate(state.gameId);
+  if (activation.kind === "unavailable") throw new Error(`not activated: ${activation.reason}`);
+}
+
 export function writerOf(harness: RuntimeHarness, gameId: GameId = GAME_ID): GameWriterPort {
   const writer = harness.registry.acquire(gameId);
   if (writer === null) throw new Error("no writer");

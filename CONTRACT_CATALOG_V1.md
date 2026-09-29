@@ -142,6 +142,17 @@ Reason: without the lease, a controller holding a replacement lease could send a
 
 البصمة تشمل عقد التحكم بعد التحقق منه. جهاز بعقد بديل لا يستلم قرارًا خُزّن تحت عقد سابق.
 
+*Amended by Phase 1 Batch 11.2 (2026-09-29, GACC-016, changelog section 24), pending review.* The fingerprint and the rule "same `client_command_id`, different command identity → `InvalidCommandIdentity`" are unchanged. What changed is which lease the comparison uses for a command id that is already bound:
+
+- **Current control lease:** authority for new commands. A new command is authorized against it and bound under it, as before.
+- **Historical stored lease:** identity evidence for commands already bound. A resend of a bound id is compared with the stored fingerprint rebuilt under the lease stored in that binding, never under the caller's current lease.
+
+So a previously bound exact semantic command replays its stored decision (`replayed_response = true`) even when the caller now holds a different control lease; the same id with a different command is `InvalidCommandIdentity`. The superseded sentence in the reason above ("With it, that command is `InvalidCommandIdentity`") no longer applies to an exact resend. Replay stays read-only: an earlier lease never authorizes a new command, and the stored decision is only returned to the seat that bound it (section 13.3).
+
+*Batch 11.3 (changelog section 25):* this lease rule is unchanged. A resend of a bound id is recognized by the game's writer before it is received, so it is never stamped or admitted (section 13.3).
+
+*تعديل الدفعة 11.2:* عقد التحكم الحالي سلطة للأوامر الجديدة فقط. العقد المحفوظ داخل الربط دليل هوية للأوامر المربوطة سابقًا. الأمر المطابق تمامًا يُعاد قراره المخزّن حتى لو كان المرسل يحمل عقدًا آخر الآن، والمعرّف نفسه مع أمر مختلف `InvalidCommandIdentity`.
+
 ### 2.7 Critical-path ban / ممنوعات المسار الحرج
 
 معالج هذا الأمر لا ينتظر: تحليلًا، ذكاءً اصطناعيًا، متجرًا، إشعارًا، بحثًا، Chess Land، تصنيفًا، شهادة، تدريبًا، إحصاءً، أو استدعاءً متزامنًا لخدمة أعلام الميزات.  
@@ -385,7 +396,7 @@ Flat JSON objects with a `type`; unknown fields are errors; no arrays; depth at 
 | `control_granted` | `requestId`, `gameId`, `seat` | *Batch 11.* This session controls the seat. `requestId` is null when another connection of the same session claimed it |
 | `control_denied` | `requestId`, `gameId`, `code`, `retryable` | *Batch 11.* The claim took nothing: `GAME_ACCESS_DENIED`, `GAME_CLOSED`, `SESSION_ENDED`, `RATE_LIMITED`, `CONFLICT`, `TEMPORARILY_UNAVAILABLE` |
 | `control_revoked` | `gameId`, `seat`, `code` | *Batch 11.* This session lost control: `CONTROL_TRANSFERRED` (another session of the same player claimed it) or `CONTROL_RELEASED` (logout, revocation, account closed, expiry). A courtesy: the writer refuses the old lease whether or not it arrives. Never names who took the seat |
-| `request_failed` | `requestId`, `code`, `retryable`, `clientCommandId` | `GAME_ACCESS_DENIED`, `GAME_NOT_FOUND`, `GAME_UNAVAILABLE`, `SUBSCRIPTION_LIMIT`, or `TEMPORARILY_UNAVAILABLE` (retryable). *Batch 11:* `CONTROL_NOT_HELD` (not retryable as is): this session does not control the seat, and the command was not received, queued, stamped, or bound; claim, then send again. `GAME_ACCESS_DENIED` now also answers a game that does not exist, so a stranger cannot tell the two apart. *Batch 11.1:* `CONTROL_NOT_HELD` is sent only when the id is also not one this seat already bound (section 13.3). `INVALID_COMMAND_IDENTITY` (not retryable): without control, the id is bound to a different command; nothing was decided or returned |
+| `request_failed` | `requestId`, `code`, `retryable`, `clientCommandId` | `GAME_ACCESS_DENIED`, `GAME_NOT_FOUND`, `GAME_UNAVAILABLE`, `SUBSCRIPTION_LIMIT`, or `TEMPORARILY_UNAVAILABLE` (retryable). *Batch 11:* `CONTROL_NOT_HELD` (not retryable as is): this session does not control the seat, and the command was not received, queued, stamped, or bound; claim, then send again. `GAME_ACCESS_DENIED` now also answers a game that does not exist, so a stranger cannot tell the two apart. *Batch 11.1:* `CONTROL_NOT_HELD` is sent only when the id is also not one this seat already bound (section 13.3). `INVALID_COMMAND_IDENTITY` (not retryable): without control, the id is bound to a different command; nothing was decided or returned. *Batch 11.3:* the same answer for the session that controls the seat; `TEMPORARILY_UNAVAILABLE` also answers a new command id reaching a writer that had not yet loaded a running game: it was not received, and sending it again is stamped then (section 13.3) |
 | `server_busy` | `requestId`, `code`, `retryable` = true, `clientCommandId` | `RATE_LIMITED`, `WRITER_QUEUE_FULL`, `WRITER_CAPACITY`; the command was not received |
 | `protocol_error` | `code`, `field` | The message was invalid; `field` is a schema field name or null |
 | `pong` | `nonce` | Answer to `ping` |
@@ -411,7 +422,7 @@ A client format, separate from the stored `live_game_state.v1`: `format`, `gameI
 - On reconnect the client sends `hello`, then `sync_game`; the snapshot is the authority (ResyncRequired → Resyncing → ActiveControlled for a granted seat). An uncertain command is resent with the same `clientCommandId` and replays.
 - Not realized yet: ViewOnly, LeaseSuperseded, lease takeover, and AbandonmentEvaluation (LIVE-MULTI-CONNECTION-001, LIVE-VIEW-ONLY-001).
 - *Batch 11:* lease takeover and LeaseSuperseded are realized for players (section 13). A reconnect of the same session keeps control and its lease; another session of the same player resyncs with `controlHeld: false` and claims to play. *Superseded by Batch 11.1:* ~~A former controller's exact resend is answered from storage only on the connection that held the lease; after a reconnect it gets `CONTROL_NOT_HELD` and resyncs to learn the outcome (GAME-CONTROL-REPLAY-RECONNECT-001).~~ ViewOnly for non-players and AbandonmentEvaluation stay unrealized (LIVE-VIEW-ONLY-001).
-- *Batch 11.1:* an uncertain command of a session that no longer controls the seat is resent with the same `clientCommandId` on any connection of any active session of the same player, also after a server restart, and replays from storage (section 13.3; GAME-CONTROL-REPLAY-RECONNECT-001 RESOLVED).
+- *Batch 11.1:* an uncertain command of a session that no longer controls the seat is resent with the same `clientCommandId` on any connection of any active session of the same player, also after a server restart, and replays from storage (section 13.3; GAME-CONTROL-REPLAY-RECONNECT-001 RESOLVED). *Batch 11.2:* the same holds for the session that controls the seat now, under a newer lease (GACC-016 RESOLVED). *Batch 11.3:* for every session the resend is a read-only lookup, never a new receipt: no `received_at`, no clock effect (section 13.3, GACC-017).
 
 الاتصال عبر WebSocket بالبروتوكول الفرعي `chess_one.realtime.v1`. الهوية والمقعد وعقد التحكم من الجلسة الموثوقة فقط. زمن الاستلام يختمه كاتب اللعبة الوحيد عند قبول الأمر في طابوره. الرد يسبق التحديث، ولا يُرسل تسلسل أقل مما أُرسل. عند الشك: إعادة اتصال ثم مزامنة.
 
@@ -466,7 +477,7 @@ The `/realtime` upgrade authenticates with the same cookie (section 11.1). The a
 
 ## 13. Game access and seat control / الوصول إلى المباراة والتحكم بالمقعد
 
-Added in Phase 1 Batch 11 (2026-09-29), pending review; decisions GACC-001 to GACC-014 in changelog section 22, and GACC-015 and GACC-016 (Batch 11.1) in section 23. It realizes section 4 for players and the authority order of section 2.1 through the realtime protocol of section 11, which stays `chess_one.realtime.v1`: every change is a new message, code, or snapshot field, and a client `controlLeaseId` is still accepted (length-checked, then discarded).
+Added in Phase 1 Batch 11 (2026-09-29), pending review; decisions GACC-001 to GACC-014 in changelog section 22, GACC-015 and GACC-016 (Batch 11.1) in section 23, and the resolution of GACC-016 (Batch 11.2) in section 24, and GACC-017 (Batch 11.3: a historical replay is never an authoritative receipt) in section 25. It realizes section 4 for players and the authority order of section 2.1 through the realtime protocol of section 11, which stays `chess_one.realtime.v1`: every change is a new message, code, or snapshot field, and a client `controlLeaseId` is still accepted (length-checked, then discarded).
 
 ### 13.1 Authority chain / سلسلة السلطة
 
@@ -490,7 +501,7 @@ Added in Phase 1 Batch 11 (2026-09-29), pending review; decisions GACC-001 to GA
 
 ### 13.3 Replay after a control change / إعادة الإرسال بعد تغيير التحكم
 
-*Batch 11.1 (2026-09-29), pending review; GACC-015 and GACC-016 in changelog section 23. Replaces the Batch 11 wording (connection memory of the last 64 ids), which is superseded.*
+*Batch 11.1 (2026-09-29), pending review; GACC-015 and GACC-016 in changelog section 23. Replaces the Batch 11 wording (connection memory of the last 64 ids), which is superseded. Batch 11.2 (changelog section 24) extends the same rule to the current controller; see the unified rule at the end of this section.*
 
 - A command admitted under a lease keeps its stored decision; the binding store remains the idempotency authority, and it is the only one. No connection memory decides a replay.
 - A session that does not control the seat may resend a command its seat already bound and receives the stored decision unchanged, with `replayed: true`. This holds on the same connection, after a reconnect, from any other active session of the same player, and after a server restart.
@@ -499,7 +510,27 @@ Added in Phase 1 Batch 11 (2026-09-29), pending review; decisions GACC-001 to GA
 - A command id the seat never bound is `CONTROL_NOT_HELD`: nothing is received, stamped, or bound. The same id with a different command is `INVALID_COMMAND_IDENTITY`, and nothing is decided or returned.
 - The lookup is limited to the requester's own seat. The opponent resending the same id finds nothing of the other seat (`CONTROL_NOT_HELD`); a non-player gets `GAME_ACCESS_DENIED`; an ended, expired, or logged-out session cannot connect at all.
 - A replay changes no sequence, binding, clock, position, outbox row, or control record.
-- The current controller is still under section 2.6.2: resending an id bound under an earlier lease is `InvalidCommandIdentity` (a command response), not a replay (GACC-016).
+- ~~The current controller is still under section 2.6.2: resending an id bound under an earlier lease is `InvalidCommandIdentity` (a command response), not a replay (GACC-016).~~ *Superseded by Batch 11.2.*
+
+**Unified rule (Batch 11.2, GACC-016 RESOLVED).** For every authenticated session of the player assigned to the seat, whether or not it controls the seat, on the same or a new connection, and after a restart:
+
+1. Look up the durable binding by `game_id`, the requester's own seat, and `client_command_id`.
+2. If a binding exists: an exact semantic match, judged under the lease stored in the binding (section 2.6.2 as amended), returns the stored response with `replayed_response = true`; any other command is an identity conflict. Nothing is admitted, stamped, bound, charged to the clock, sequenced, or written to the outbox.
+3. Only if no binding exists does control matter: without control, `CONTROL_NOT_HELD`; with control, the normal new-command path.
+
+~~The identity conflict reaches the client in the family of the path that found it: the controller's command is decided by the live game, so it is a `command_response` with code `InvalidCommandIdentity`; a session without control is never decided for, so it is `request_failed INVALID_COMMAND_IDENTITY`. Both mean the same thing and change nothing.~~ *Superseded by Batch 11.3.*
+
+~~A command admitted under the current lease is recognized in the live game's identity step (catalog 2.3 step 3), so a controller's resend costs no extra read; a command not admitted under it (no control, or the lease rotated away) is recognized by the read-only historical lookup above.~~ *Superseded by Batch 11.3: the controller's resend was stamped and queued as a new command before its binding was found.*
+
+**A historical replay is never an authoritative receipt (Batch 11.3, changelog section 25, GACC-017).** A replay is read-only and works the same whatever the caller's control, connection, or session:
+
+- A command id already bound for the seat is never received. It gets no `received_at` (section 2.3 item 7, DEC-063), no clock reading, and no admission as a new command. The stored response is returned with `replayed_response = true`. The same id with a different command is `request_failed INVALID_COMMAND_IDENTITY` (not retryable) for every session, controller or not; it is never a `command_response` and carries no receipt time. Nothing changes: clock, sequence, position, bindings, outbox, and control lease.
+- The durable binding store is the only source of truth. The game's writer keeps in memory the game state it last loaded or committed itself, bindings included. It uses that copy at ingress, with no database read, to tell a bound id from a new one. A binding, once committed, is never removed, so an id found there is certainly bound. The writer never treats an id as new just because its memory lacks it: an id counts as new only when the writer has loaded the game and no job still queued ahead could bind that id.
+- A new command id, admitted under the seat's current lease on a writer that has loaded the game, is stamped at ingress with one reading of the writer's monotonic clock, before any database access. No database latency is charged to the player.
+- A command the writer cannot yet classify is only looked up, never stamped. That happens when the writer has not loaded the game, or when an earlier command with the same id is still queued. The lookup runs in queue order on a fresh load. A bound id is replayed, or it is an identity conflict. An unbound id without control is `CONTROL_NOT_HELD`. An unbound id with control on a game whose clock runs in this process's clock domain is **not received**: `request_failed TEMPORARILY_UNAVAILABLE` (retryable), with nothing stamped, decided, or bound, and sending it again is stamped at ingress. Stamping it after the load would charge the database read to the player, so it is refused instead. When no clock runs here (the game is finished, rules-unresolved, or paused for recovery), the command is received after the load, which charges nothing, and it gets the normal answer, for example `recovery_required`.
+- First load and restart. A running game enters play through `startGame`, which loads its writer before returning (LIVE-WRITER-ACTIVATION-001), and a running writer never retires. So every command to a running game in this process meets a loaded writer. A new process is a new clock domain, so every stored running game it finds is paused for recovery. The not-received answer above is therefore a fail-safe, not a path a player normally takes. After a restart, the first request with an old bound id is a replay or a conflict from the stored binding, with no receipt.
+
+*الدفعة 11.3:* إعادة الإرسال التاريخية قراءة فقط وليست استلامًا رسميًا أبدًا، مهما كان تحكم المرسل أو اتصاله أو جلسته. المعرّف المربوط لا يُختم له زمن استلام ولا يُقرأ له الزمن الرتيب ولا يُقبل كأمر جديد، ويُعاد قراره المخزّن، والمعرّف نفسه مع أمر مختلف `request_failed INVALID_COMMAND_IDENTITY` لكل الجلسات. الأمر الجديد يُختم عند الدخول قبل أي قراءة من قاعدة البيانات. الكاتب الذي لم يحمّل المباراة لا يختم شيئًا: يبحث بعد التحميل، والأمر الجديد في مباراة تجري ساعتها هنا يُرفض كغير مستلم (`TEMPORARILY_UNAVAILABLE`) ليُعاد إرساله.
 
 ### 13.4 Trusted creation / الإنشاء الموثوق
 

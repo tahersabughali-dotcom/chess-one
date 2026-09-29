@@ -10,6 +10,7 @@ import {
   runtimeHarness,
   store,
   storedState,
+  storeInPlay,
   submitAs,
   syncOf,
   viewOf,
@@ -40,8 +41,9 @@ describe("TST-RT-OWN concurrency conflicts stop the writer and pause the game (L
     const { a, b, s0 } = twoProcesses();
     await store(a, s0);
 
-    // 1. Writer A runs the game and watches its deadline.
+    // 1. Writer A runs the game and watches its deadline; so does writer B.
     expect((await a.registry.activate(GAME_ID)).kind).toBe("watching");
+    expect((await b.registry.activate(GAME_ID)).kind).toBe("watching");
     const writerA = writerOf(a);
     const subscriber = new RecordingSubscriber();
     writerA.subscribe(subscriber);
@@ -119,6 +121,7 @@ describe("TST-RT-OWN concurrency conflicts stop the writer and pause the game (L
     const { a, b, s0 } = twoProcesses();
     await store(a, s0);
     await a.registry.activate(GAME_ID);
+    await b.registry.activate(GAME_ID);
     const writerA = writerOf(a);
     const subscriber = new RecordingSubscriber();
     writerA.subscribe(subscriber);
@@ -145,6 +148,7 @@ describe("TST-RT-OWN concurrency conflicts stop the writer and pause the game (L
     const { a, b, s0 } = twoProcesses(1_000);
     await store(a, s0);
     await a.registry.activate(GAME_ID);
+    await b.registry.activate(GAME_ID);
     const wake = a.scheduler.single();
     b.clock.set(1_500);
     expect((await decided(submitAs(writerOf(b), s0, "white", moveCommand(s0, "d2d4")))).code).toBe(
@@ -169,6 +173,7 @@ describe("TST-RT-OWN concurrency conflicts stop the writer and pause the game (L
     const { a, b, s0 } = twoProcesses();
     await store(a, s0);
     await a.registry.activate(GAME_ID);
+    await b.registry.activate(GAME_ID);
     const writerA = writerOf(a);
     const subscriber = new RecordingSubscriber();
     writerA.subscribe(subscriber);
@@ -188,7 +193,7 @@ describe("TST-RT-OWN concurrency conflicts stop the writer and pause the game (L
   it("TST-RT-OWN-005 WRITER_FAULT is only an unexpected exception: rejections, persistence failures, conflicts, and clock-domain pauses keep their own paths", async () => {
     const rejected = runtimeHarness();
     const s0 = newGame();
-    await store(rejected, s0);
+    await storeInPlay(rejected, s0);
     const illegal = await decided(
       submitAs(writerOf(rejected), s0, "white", moveCommand(s0, "e2e5")),
     );
@@ -196,14 +201,14 @@ describe("TST-RT-OWN concurrency conflicts stop the writer and pause the game (L
     expect(rejected.registry.infrastructurePause(GAME_ID)).toBeUndefined();
 
     const persistence = runtimeHarness();
-    await store(persistence, s0);
+    await storeInPlay(persistence, s0);
     persistence.repository.commitFault = "fail";
     expect(
       await submitAs(writerOf(persistence), s0, "white", moveCommand(s0, "e2e4")).outcome,
     ).toEqual({ kind: "recovery_required", gameId: GAME_ID, reason: "PERSISTENCE_UNAVAILABLE" });
 
     const conflict = runtimeHarness();
-    await store(conflict, s0);
+    await storeInPlay(conflict, s0);
     conflict.repository.commitFault = "conflict";
     expect(
       await submitAs(writerOf(conflict), s0, "white", moveCommand(s0, "e2e4")).outcome,
@@ -219,7 +224,7 @@ describe("TST-RT-OWN concurrency conflicts stop the writer and pause the game (L
     expectNoFault(rejected, persistence, conflict, domain);
 
     const defect = runtimeHarness();
-    await store(defect, s0);
+    await storeInPlay(defect, s0);
     defect.repository.loadThrows = true;
     expect(await submitAs(writerOf(defect), s0, "white", moveCommand(s0, "e2e4")).outcome).toEqual({
       kind: "recovery_required",

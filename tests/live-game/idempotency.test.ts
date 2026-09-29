@@ -33,10 +33,11 @@ function fingerprint(command: LiveGameCommand): string {
 }
 
 describe("TST-LIVE command identity across lease rotation", () => {
-  it("TST-LIVE-100 a new controller reusing an old command id and payload does not receive the old lease's decision", () => {
+  it("TST-LIVE-100 a new controller resending an old command id and payload receives the stored decision; the stored lease is the identity evidence (GACC-016)", () => {
     const game = newGame();
     const original = moveCommand(game, "e2e4", { clientCommandId: "cmd-1" });
-    const accepted = submit(game, original, START_MS + 10).nextState;
+    const first = submit(game, original, START_MS + 10);
+    const accepted = first.nextState;
     const rotated = withRotatedLease(accepted, "white", ROTATED_WHITE_LEASE);
 
     const stale = submit(rotated, original, START_MS + 20, "white");
@@ -45,14 +46,24 @@ describe("TST-LIVE command identity across lease rotation", () => {
     const reused = { ...original, controlLeaseId: ROTATED_WHITE_LEASE };
     const actor = actorFor(rotated, "white");
     expect(actor.controlLeaseId).toBe(ROTATED_WHITE_LEASE);
+    expect(fingerprint(reused)).not.toBe(accepted.commandBindings[0]?.fingerprint);
     const decision = processCommand(rotated, actor, reused, at(START_MS + 30));
-    expect(decision.response).toMatchObject({
+    expect(decision.response).toEqual({ ...first.response, replayedResponse: true });
+    expect(decision.nextState).toBe(rotated);
+    expect(decision.events).toEqual([]);
+
+    const altered = processCommand(
+      rotated,
+      actor,
+      { ...reused, toSquare: "e3" },
+      at(START_MS + 40),
+    );
+    expect(altered.response).toMatchObject({
       code: "InvalidCommandIdentity",
       replayedResponse: false,
     });
-    expect(decision.nextState).toBe(rotated);
-    expect(decision.events).toEqual([]);
-    expect(fingerprint(reused)).not.toBe(accepted.commandBindings[0]?.fingerprint);
+    expect(altered.nextState).toBe(rotated);
+    expect(altered.events).toEqual([]);
   });
 
   it("TST-LIVE-101 the same command id, payload, and original lease still replays", () => {

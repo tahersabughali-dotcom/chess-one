@@ -352,24 +352,62 @@ describe("TST-GACC-EDGE seat control over the real edge (production resolver, re
     });
   });
 
-  it("TST-GACC-EDGE-013 the new controller resending an id bound under the former lease gets InvalidCommandIdentity (LIVE-CONTRACT-005), and nothing changes", async () => {
+  it("TST-GACC-EDGE-013 the current controller replays a command bound under a former lease and an altered one is INVALID_COMMAND_IDENTITY, both never received; a new one plays (GACC-016)", async () => {
     await withStack({}, async (stack) => {
       const p = await players(stack);
       const a = await socketOf(stack, p.whiteCookie);
       await claimGranted(a, "claim-a");
       a.send(moveMessage("mv-x", "X", 0, "e2e4"));
-      expect(field(await response(a), "code")).toBe("Accepted");
+      const original = await response(a);
       const b = await socketOf(stack, await logIn(stack, "whitey"));
       await claimGranted(b, "claim-b");
       await a.next("control_revoked");
+      expect(field(await b.sync(GAME_ID), "snapshot", "controlHeld")).toBe(true);
       const before = await storedState(stack.ga.runtime);
+      const commits = stack.ga.runtime.repository.commits;
+      const wakes = stack.ga.runtime.scheduler.pending().length;
+      const submitted = stack.facts.count("command_submitted");
+      stack.ga.runtime.clock.advance(3_000);
+      const reads = stack.ga.runtime.clock.reads;
+
       b.send(moveMessage("mv-x-b", "X", 0, "e2e4"));
-      const answer = await response(b);
-      expect(field(answer, "code")).toBe("InvalidCommandIdentity");
-      expect(field(answer, "replayed")).toBe(false);
-      expect((await storedState(stack.ga.runtime)).sequence).toBe(before.sequence);
-      expect((await storedState(stack.ga.runtime)).commandBindings).toEqual(before.commandBindings);
-      await Promise.all([a.close(), b.close()]);
+      expectReplayOf(original, await response(b));
+      b.send(moveMessage("mv-x-b-altered", "X", 0, "d2d4"));
+      expect(await failure(b)).toEqual({
+        type: "request_failed",
+        requestId: "mv-x-b-altered",
+        code: "INVALID_COMMAND_IDENTITY",
+        retryable: false,
+        clientCommandId: "X",
+      });
+      expect(b.unread("command_response")).toEqual([]);
+      expect(stack.ga.runtime.clock.reads).toBe(reads);
+      expect(stack.facts.count("command_submitted")).toBe(submitted);
+      expect(stack.facts.named("command_lookup")).toEqual([
+        { name: "command_lookup", gameId: GAME_ID, lookup: "bound" },
+        { name: "command_lookup", gameId: GAME_ID, lookup: "bound" },
+      ]);
+      expect(await storedState(stack.ga.runtime)).toEqual(before);
+      expect(stack.ga.runtime.repository.commits).toBe(commits);
+      expect(stack.ga.runtime.scheduler.pending().length).toBe(wakes);
+      expect(stack.ga.runtime.facts.count("command_refused_control")).toBe(0);
+      expect(JSON.stringify(b.received)).not.toMatch(/lease|fingerprint/i);
+
+      const black = await socketOf(stack, p.blackCookie);
+      await claimGranted(black, "claim-k");
+      black.send(moveMessage("mv-k", "K", 1, "e7e5"));
+      expect(field(await response(black), "code")).toBe("Accepted");
+      b.send(moveMessage("mv-y-b", "Y", 2, "g1f3"));
+      const played = await response(b);
+      expect([field(played, "code"), field(played, "replayed")]).toEqual(["Accepted", false]);
+      const after = await storedState(stack.ga.runtime);
+      expect(after.sequence).toBe(3);
+      expect(after.commandBindings.map((binding) => binding.clientCommandId)).toEqual([
+        "X",
+        "K",
+        "Y",
+      ]);
+      await Promise.all([a.close(), b.close(), black.close()]);
     });
   });
 

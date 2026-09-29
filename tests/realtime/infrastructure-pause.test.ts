@@ -22,6 +22,7 @@ import {
   runtimeHarness,
   store,
   storedState,
+  storeInPlay,
   submitAs,
   syncOf,
   viewOf,
@@ -111,7 +112,7 @@ describe("TST-RT-PAUSE persistence outage pauses play at the last durable balanc
     const h = runtimeHarness({}, contract);
     const s0 = newGame();
     const s1 = playMoves(s0, ["e2e4"]).state;
-    await store(h, s0);
+    await storeInPlay(h, s0);
     const writer = writerOf(h);
     const subscriber = new RecordingSubscriber();
     writer.subscribe(subscriber);
@@ -233,7 +234,7 @@ describe("TST-RT-PAUSE persistence outage pauses play at the last durable balanc
   it("TST-RT-PAUSE-006 the pause outlives its writer: after idle retirement the next writer refuses play at once and arms no timer", async () => {
     const h = runtimeHarness();
     const s0 = newGame();
-    await store(h, s0);
+    await storeInPlay(h, s0);
     const writer = writerOf(h);
     const subscriber = new RecordingSubscriber();
     writer.subscribe(subscriber);

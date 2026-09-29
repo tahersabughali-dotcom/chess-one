@@ -28,6 +28,7 @@ import {
   runtimeHarness,
   store,
   storedState,
+  storeInPlay,
   submitAs,
   syncOf,
   viewOf,
@@ -53,7 +54,7 @@ describe("TST-RT writer registry and ingress", () => {
     const s0 = newGame();
     const s1 = playMoves(s0, ["e2e4"]).state;
     const s2 = playMoves(s0, ["e2e4", "e7e5"]).state;
-    await store(h, s0);
+    await storeInPlay(h, s0);
     const writer = writerOf(h);
     const subscriber = new RecordingSubscriber();
     writer.subscribe(subscriber);
@@ -91,7 +92,7 @@ describe("TST-RT writer registry and ingress", () => {
     const s0 = newGame();
     const s1 = playMoves(s0, ["e2e4"]).state;
     const s2 = playMoves(s0, ["e2e4", "e7e5"]).state;
-    await store(h, s0);
+    await storeInPlay(h, s0);
     const writer = writerOf(h);
     h.repository.hold();
     const a = submitAs(writer, s0, "white", moveCommand(s0, "e2e4"));
@@ -113,17 +114,21 @@ describe("TST-RT writer registry and ingress", () => {
     ]);
   });
 
-  it("TST-RT-004 duplicate submissions of one command execute once; the second is a replay", async () => {
+  it("TST-RT-004 duplicate submissions of one command execute once; the second is a replay, never received", async () => {
     const h = runtimeHarness();
     const s0 = newGame();
-    await store(h, s0);
+    await storeInPlay(h, s0);
     const writer = writerOf(h);
     const subscriber = new RecordingSubscriber();
     writer.subscribe(subscriber);
     h.repository.hold();
     const command = moveCommand(s0, "e2e4");
     const first = submitAs(writer, s0, "white", command);
+    const reads = h.clock.reads;
     const second = submitAs(writer, s0, "white", command);
+    expect(first.ingress).toEqual({ accepted: true, receivedAt: START_MS });
+    expect(second.ingress).toEqual({ accepted: true, receivedAt: null, lookup: "unresolved" });
+    expect(h.clock.reads).toBe(reads);
     h.repository.release();
     const [a, b] = await Promise.all([decided(first), decided(second)]);
     expect([a.code, a.replayedResponse, a.sequence]).toEqual(["Accepted", false, 1]);
@@ -138,7 +143,7 @@ describe("TST-RT deadlines in the writer's clock domain", () => {
   it("TST-RT-005 a command received exactly at the deadline is timely; 1 ms later is late", async () => {
     const timely = runtimeHarness();
     const s0 = newGame({ initialMs: 1_000 });
-    await store(timely, s0);
+    await storeInPlay(timely, s0);
     timely.clock.set(2_000);
     const atDeadline = await decided(
       submitAs(writerOf(timely), s0, "white", moveCommand(s0, "e2e4")),
@@ -147,7 +152,7 @@ describe("TST-RT deadlines in the writer's clock domain", () => {
     expect(atDeadline.clock.remainingMs.white).toBe(0);
 
     const late = runtimeHarness();
-    await store(late, s0);
+    await storeInPlay(late, s0);
     late.clock.set(2_001);
     const afterDeadline = await decided(
       submitAs(writerOf(late), s0, "white", moveCommand(s0, "e2e4")),
@@ -260,7 +265,7 @@ describe("TST-RT persistence failures and consistency", () => {
   it("TST-RT-011 a failed commit is never Accepted and publishes nothing; play pauses and the command id stays unbound", async () => {
     const h = runtimeHarness();
     const s0 = newGame();
-    await store(h, s0);
+    await storeInPlay(h, s0);
     const writer = writerOf(h);
     const subscriber = new RecordingSubscriber();
     writer.subscribe(subscriber);
@@ -294,7 +299,7 @@ describe("TST-RT persistence failures and consistency", () => {
   it("TST-RT-012 an ambiguous commit (applied, reported failed) is not Accepted; the landed transition is served paused and its binding replays later", async () => {
     const h = runtimeHarness();
     const s0 = newGame();
-    await store(h, s0);
+    await storeInPlay(h, s0);
     const writer = writerOf(h);
     const subscriber = new RecordingSubscriber();
     writer.subscribe(subscriber);
@@ -332,7 +337,7 @@ describe("TST-RT persistence failures and consistency", () => {
   it("TST-RT-013 a concurrency conflict pauses the game and stops the writer: no overwrite, no retry, waiting requests answered, subscribers told, no writer started by itself", async () => {
     const h = runtimeHarness();
     const s0 = newGame();
-    await store(h, s0);
+    await storeInPlay(h, s0);
     const writer = writerOf(h);
     const subscriber = new RecordingSubscriber();
     writer.subscribe(subscriber);
@@ -472,7 +477,7 @@ describe("TST-RT writer lifecycle", () => {
 
     const h = runtimeHarness();
     const s0 = newGame();
-    await store(h, s0);
+    await storeInPlay(h, s0);
     const port = writerOf(h);
     port.subscribe({
       onUpdate: () => {

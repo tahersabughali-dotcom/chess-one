@@ -52,6 +52,7 @@ export { createSystemClockDomain, createSystemWakeScheduler } from "./system.ts"
 export type {
   Activation,
   CommandIngress,
+  CommandLookup,
   CommandOutcome,
   ControlNotHeld,
   GameControlPort,

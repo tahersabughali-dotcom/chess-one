@@ -5,10 +5,12 @@ import {
   type CommandResponse,
   type GameParticipant,
   historicalReplay,
+  isControlLeaseId,
   type LeaselessCommand,
   type LiveGameCommand,
   planCommit,
   planLeaseRotation,
+  type SubmitMoveCommandV1,
   withControlLease,
 } from "@chess-one/live-game";
 import { describe, expect, it } from "vitest";
@@ -191,6 +193,46 @@ describe("TST-GACC-CORE control lease rotation in the live-game core", () => {
     expect(historicalReplay(final, WHITE, { ...leaseless(claim), toSquare: "h3" }).kind).toBe(
       "identity_conflict",
     );
+  });
+
+  it("TST-GACC-CORE-011 the controller's current lease governs new commands only: bindings made under earlier leases replay under a later one (GACC-016)", () => {
+    const s0 = newGame();
+    const x = moveCommand(s0, "e2e4");
+    const afterX = submit(s0, x, START_MS + 10);
+    const blackMoved = submit(
+      afterX.nextState,
+      moveCommand(afterX.nextState, "e7e5"),
+      START_MS + 20,
+    );
+    const underB = rotated(blackMoved.nextState);
+    const y = moveCommand(underB, "g1f3", { controlLeaseId: ROTATED_WHITE_LEASE });
+    const afterY = submit(underB, y, START_MS + 30);
+    expect(afterY.response.code).toBe("Accepted");
+    const yBinding = afterY.nextState.commandBindings.at(-1);
+    expect(yBinding === undefined ? null : boundLease(yBinding.fingerprint)).toBe(
+      ROTATED_WHITE_LEASE,
+    );
+    const leaseC = "lease-white-3";
+    if (!isControlLeaseId(leaseC)) throw new Error("bad lease");
+    const underC = rotated(afterY.nextState, leaseC);
+    const bound: readonly (readonly [SubmitMoveCommandV1, CommandResponse])[] = [
+      [x, afterX.response],
+      [y, afterY.response],
+    ];
+    for (const [command, original] of bound) {
+      const resent = submit(underC, { ...command, controlLeaseId: leaseC }, START_MS + 40, "white");
+      expect(resent.response).toEqual({ ...original, replayedResponse: true });
+      expect(resent.nextState).toBe(underC);
+      expect(resent.events).toEqual([]);
+    }
+    const altered = submit(
+      underC,
+      { ...y, controlLeaseId: leaseC, toSquare: "h3" },
+      START_MS + 50,
+      "white",
+    );
+    expect(altered.response.code).toBe("InvalidCommandIdentity");
+    expect(altered.nextState).toBe(underC);
   });
 
   it("TST-GACC-CORE-010 a stored fingerprint whose lease field is not a lease is a conflict, never a guess", () => {

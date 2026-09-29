@@ -565,7 +565,9 @@ export class RealtimeConnection {
    * The command context is composed here and nowhere else: the actor from
    * the session, the seat from the assignment, and the lease this session
    * holds, which replaces anything the client sent. A command without
-   * control is never admitted; it can only be a historical replay.
+   * control is never admitted; it can only be a historical replay. With
+   * control, the writer itself takes a bound command id as a lookup, never
+   * as a received command, and answers it as it would without control.
    */
   #submit(entry: SeatEntry, command: ClientCommand, requestId: string | null): void {
     const { gameId } = entry;
@@ -587,7 +589,11 @@ export class RealtimeConnection {
       (outcome) => this.#answered(entry, lease, command, outcome, requestId),
     );
     if (ingress.accepted) {
-      this.#config.facts.record({ name: "command_submitted", gameId });
+      this.#config.facts.record(
+        ingress.receivedAt === null
+          ? { name: "command_lookup", gameId, lookup: ingress.lookup }
+          : { name: "command_submitted", gameId },
+      );
     } else if (ingress.reason === "control_not_held") {
       this.#seats.lost(entry, lease);
       this.#historical(entry, command, requestId);
@@ -667,6 +673,9 @@ export class RealtimeConnection {
       case "control_not_held":
         this.#seats.lost(entry, lease);
         this.#historical(entry, command, requestId);
+        return;
+      case "identity_conflict":
+        this.#failed(requestId, "INVALID_COMMAND_IDENTITY", clientCommandId);
         return;
       case "recovery_required":
         this.#recoveryRequired(outcome.gameId, outcome.reason, requestId, clientCommandId);

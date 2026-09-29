@@ -12,9 +12,9 @@ function moveText(move: MoveIntent | undefined): string {
  * as canonical text rather than a hash, so equality is exact. It binds the
  * command name and version, `game_id`, the control lease, and the move,
  * claim, or draw-offer response fields (`offer_id` and the decision); a
- * resignation and a draw offer have no further fields. The lease has already
- * been checked against the seat's current lease, so a controller under a
- * replacement lease never receives a decision stored for an earlier lease. It
+ * resignation and a draw offer have no further fields. A new command is
+ * bound under the seat's current lease; a bound command is recognized under
+ * the lease stored in its fingerprint (`matchesBinding`). It
  * never includes client time, client SAN, `actor_id`,
  * `expected_game_sequence`, or `client_command_id`, which is the lookup key
  * together with the seat.
@@ -45,6 +45,18 @@ export function fingerprintOf(command: ParsedCommand): string {
 export function boundLease(fingerprint: string): ControlLeaseId | null {
   const lease = fingerprint.split(" ")[2];
   return lease !== undefined && isControlLeaseId(lease) ? lease : null;
+}
+
+/**
+ * LIVE-CONTRACT-005 as amended by GACC-016: `command` is the command bound
+ * in `binding` when its fingerprint, rebuilt under the lease the binding was
+ * stored with, equals the stored text exactly. The caller's current lease
+ * governs new commands only; it is never evidence about a bound one.
+ */
+export function matchesBinding(binding: CommandBinding, command: ParsedCommand): boolean {
+  const lease = boundLease(binding.fingerprint);
+  if (lease === null) return false;
+  return fingerprintOf({ ...command, controlLeaseId: lease }) === binding.fingerprint;
 }
 
 /** The binding decision stored for this seat and client command id, if any. */

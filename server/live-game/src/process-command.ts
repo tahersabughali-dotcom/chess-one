@@ -21,7 +21,12 @@ import {
   stopClock,
   type WallClockMs,
 } from "./clock.ts";
-import { findBinding, fingerprintOf, replayedResponse } from "./command-identity.ts";
+import {
+  findBinding,
+  fingerprintOf,
+  matchesBinding,
+  replayedResponse,
+} from "./command-identity.ts";
 import { type LiveGameCommand, type ParsedCommand, parseCommand } from "./commands.ts";
 import {
   type Attempt,
@@ -197,8 +202,10 @@ function authorizationFailure(
  * 1. shape (`InvalidState`, not bound);
  * 2. game, player, seat, control lease, and `actor_id` echo from the trusted
  *    actor (`Unauthorized`, not bound);
- * 3. command identity: a stored binding with the same fingerprint is replayed
- *    unchanged; a different fingerprint is `InvalidCommandIdentity`;
+ * 3. command identity: a stored binding whose fingerprint equals the
+ *    command's, rebuilt under the lease the binding was stored with, is
+ *    replayed unchanged; any other command under a bound id is
+ *    `InvalidCommandIdentity`;
  * 4. a finished game is `GameAlreadyFinished` (not bound); an unresolved game
  *    is rejected with its reason (not bound);
  * 5. a move or claim seat must be the side to move (`NotYourTurn`, bound); a
@@ -247,13 +254,13 @@ export function processCommand(
   const unauthorized = authorizationFailure(state, actor, parsedCommand);
   if (unauthorized !== null) return reject(attempt, "Unauthorized", unauthorized);
 
-  const fingerprint = fingerprintOf(parsedCommand);
   const previous = findBinding(state, actor.seat, parsedCommand.clientCommandId);
   if (previous !== undefined) {
-    return previous.fingerprint === fingerprint
+    return matchesBinding(previous, parsedCommand)
       ? Object.freeze({ nextState: state, response: replayedResponse(previous), events: NO_EVENTS })
       : reject(attempt, "InvalidCommandIdentity");
   }
+  const fingerprint = fingerprintOf(parsedCommand);
   const judged: JudgedAttempt = {
     ...attempt,
     commandId: parsedCommand.clientCommandId,

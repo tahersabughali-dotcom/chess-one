@@ -46,7 +46,14 @@ export type EdgeFact =
   | { readonly name: "sync_served"; readonly gameId: GameId }
   | { readonly name: "recovery_required_sent"; readonly gameId: GameId }
   | { readonly name: "server_busy"; readonly code: BusyCode }
+  /** Received by the writer: stamped at its ingress as a new command. */
   | { readonly name: "command_submitted"; readonly gameId: GameId }
+  /** Taken by the writer for a lookup of the stored bindings: not received, not stamped. */
+  | {
+      readonly name: "command_lookup";
+      readonly gameId: GameId;
+      readonly lookup: "bound" | "unresolved";
+    }
   /** Refused before the writer: this session does not hold the seat's control. */
   | { readonly name: "command_refused_control"; readonly gameId: GameId }
   | {

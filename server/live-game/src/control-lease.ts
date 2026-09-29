@@ -1,6 +1,6 @@
 import { err, ok, type Result } from "@chess-one/game-values";
 import type { ActiveGameState, CommandResponse } from "./active-game.ts";
-import { boundLease, findBinding, fingerprintOf, replayedResponse } from "./command-identity.ts";
+import { boundLease, findBinding, matchesBinding, replayedResponse } from "./command-identity.ts";
 import { type LeaselessCommand, parseCommand } from "./commands.ts";
 import { type ControlLeaseId, type GameId, isCommandId, type PlayerId, type Seat } from "./ids.ts";
 
@@ -49,10 +49,10 @@ const IDENTITY_CONFLICT: HistoricalReplay = Object.freeze({ kind: "identity_conf
 
 /**
  * Read-only retrieval of a decision already bound to the participant's seat,
- * for a session that does not hold the seat's control. The lease is never
- * taken from the caller: the command is rebuilt under the lease its binding
- * was stored with, and replayed only if that rebuilt fingerprint equals the
- * stored one exactly (CONTRACT_CATALOG_V1 2.6.2 is unchanged). It decides
+ * for a session whose command is not admitted under the seat's current
+ * lease. The lease is never taken from the caller: the command is recognized
+ * by `matchesBinding`, the same rule `processCommand` applies to the
+ * controller (CONTRACT_CATALOG_V1 2.6.2 as amended by GACC-016). It decides
  * nothing and returns no state: no sequence, clock, binding, or event.
  */
 export function historicalReplay(
@@ -71,6 +71,6 @@ export function historicalReplay(
   if (!parsed.ok) return IDENTITY_CONFLICT;
   const { actorId } = parsed.value;
   if (actorId !== null && actorId !== participant.playerId) return NOT_BOUND;
-  if (fingerprintOf(parsed.value) !== binding.fingerprint) return IDENTITY_CONFLICT;
+  if (!matchesBinding(binding, parsed.value)) return IDENTITY_CONFLICT;
   return Object.freeze({ kind: "replayed", response: replayedResponse(binding) });
 }

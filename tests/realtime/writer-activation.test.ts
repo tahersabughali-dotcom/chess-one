@@ -16,6 +16,7 @@ import {
   runtimeHarness,
   store,
   storedState,
+  storeInPlay,
   submitAs,
   writerOf,
 } from "./support/runtime.ts";
@@ -116,7 +117,7 @@ describe("TST-RT-ACT writer activation (LIVE-WRITER-ACTIVATION-001)", () => {
 
     const persistencePaused = runtimeHarness();
     const s0 = newGame();
-    await store(persistencePaused, s0);
+    await storeInPlay(persistencePaused, s0);
     persistencePaused.repository.commitFault = "fail";
     await submitAs(writerOf(persistencePaused), s0, "white", moveCommand(s0, "e2e4")).outcome;
     persistencePaused.repository.commitFault = "none";

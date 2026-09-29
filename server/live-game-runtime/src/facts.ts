@@ -46,12 +46,14 @@ export type RuntimeFact =
   | { readonly name: "control_lease_rotated"; readonly gameId: GameId; readonly seat: Seat }
   /** A historical replay whose command id is bound to a different command: nothing returned. */
   | { readonly name: "replay_identity_conflict"; readonly gameId: GameId }
+  /** A lookup found its id unbound while the clock runs: never received; it may be sent again. */
+  | { readonly name: "command_not_received"; readonly gameId: GameId }
   | { readonly name: "deadline_flagged"; readonly gameId: GameId }
   | {
       /** An unexpected exception inside the writer; the error itself goes to `reportDefect` only. */
       readonly name: "writer_fault";
       readonly gameId: GameId;
-      readonly job: "command" | "sync" | "deadline" | "lease" | "replay" | "none";
+      readonly job: "command" | "lookup" | "sync" | "deadline" | "lease" | "replay" | "none";
     }
   | { readonly name: "subscriber_defect"; readonly gameId: GameId };
 

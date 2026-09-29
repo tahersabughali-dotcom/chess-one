@@ -31,11 +31,36 @@ export interface WriterLimits {
  * it is stamped. So a rotation is the linearization point of a control
  * change: every command admitted before it ran under the old lease, and
  * none is admitted under that lease after it.
+ *
+ * Historical replay (Batch 11.3): a command id the seat already bound is
+ * never received. Before any clock reading the writer looks the id up in the
+ * game as it last loaded or committed it; a bound id, or one it cannot rule
+ * out, is taken as a `CommandLookup` instead, whoever controls the seat.
  */
 export type CommandIngress =
   | { readonly accepted: true; readonly receivedAt: MonotonicMs }
+  | CommandLookup
   | IngressRefused
   | ControlNotHeld;
+
+/**
+ * Taken for a lookup of the stored bindings, not received: the writer read
+ * no clock for it, and it has no `receivedAt` and no place among received
+ * commands. The lease is not checked first: a bound id is answered from its
+ * binding whoever controls the seat.
+ * - `bound`: the seat bound the command id, as of the writer's last load or
+ *   commit; the job answers from the stored binding, a replay or an
+ *   identity conflict.
+ * - `unresolved`: the writer cannot rule a binding out, because it has not
+ *   loaded the game yet or the same id already waits in its queue. The job
+ *   answers from the stored binding if there is one; otherwise see
+ *   `CommandOutcome` for when the command is received.
+ */
+export interface CommandLookup {
+  readonly accepted: true;
+  readonly receivedAt: null;
+  readonly lookup: "bound" | "unresolved";
+}
 
 export type SyncIngress = { readonly accepted: true } | IngressRefused;
 
@@ -73,15 +98,25 @@ export interface RecoveryRequired {
   readonly reason: RecoveryReason;
 }
 
+/**
+ * The answer to a received command or to a `CommandLookup`. A lookup whose
+ * command id turns out to be unbound was not received at ingress, so it is
+ * judged as a new command at its turn in the queue: under the seat's lease
+ * at the end of the queue (else `control_not_held`), and then:
+ * - while the game's clock runs in this writer's clock domain it is not
+ *   received at all, since a receipt taken now would charge the player for
+ *   the load and the queue: `unavailable` / `temporarily_unavailable`, and
+ *   the same command id may be sent again;
+ * - otherwise no clock is charged in this domain (finished, rules-unresolved,
+ *   or recovery-paused), so it is received now and decided as usual.
+ */
 export type CommandOutcome =
   /** A durable decision: committed, or deciding nothing that needed a write. */
   | { readonly kind: "decided"; readonly response: CommandResponse }
-  /**
-   * Only a writer that had not loaded the game admits a command before it
-   * knows the lease; the job then checks it first, before the core sees the
-   * command, and discards the provisional stamp. Nothing is decided or bound.
-   */
+  /** The lease is not the seat's lease: nothing is received, decided, or bound. */
   | { readonly kind: "control_not_held" }
+  /** A lookup found the id bound to a different command: nothing is received or returned. */
+  | { readonly kind: "identity_conflict" }
   | RecoveryRequired
   | Unavailable;
 
@@ -171,7 +206,8 @@ export interface GameWriterPort {
   /**
    * Looks up the stored decision of a command the participant's seat already
    * bound, for a session without the seat's control. No lease is taken: the
-   * binding's own lease is used. Read-only: nothing is received or stamped.
+   * binding's own lease is used. Read-only: nothing is received or stamped,
+   * exactly as for a `CommandLookup` of the controlling session.
    */
   replayCommand(
     participant: GameParticipant,

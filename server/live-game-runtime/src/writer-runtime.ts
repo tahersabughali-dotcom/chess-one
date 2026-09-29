@@ -2,6 +2,7 @@ import { err } from "@chess-one/game-values";
 import {
   type ActiveGameState,
   type AuthorizedGameActor,
+  type CommitPlan,
   type ControlLeaseId,
   type ExecutionError,
   executeCommand,
@@ -30,6 +31,7 @@ import {
   type Activation,
   activationOf,
   type CommandIngress,
+  type CommandLookup,
   type CommandOutcome,
   type ControlNotHeld,
   type GameControlPort,
@@ -60,6 +62,12 @@ type Job =
       readonly actor: AuthorizedGameActor;
       readonly command: LiveGameCommand;
       readonly receivedAt: MonotonicMs;
+      readonly reply: (outcome: CommandOutcome) => void;
+    }
+  | {
+      readonly kind: "lookup";
+      readonly actor: AuthorizedGameActor;
+      readonly command: LiveGameCommand;
       readonly reply: (outcome: CommandOutcome) => void;
     }
   | { readonly kind: "sync"; readonly reply: (outcome: SyncOutcome) => void }
@@ -110,6 +118,25 @@ function unavailable(reason: UnavailableReason): Unavailable {
   return Object.freeze({ kind: "unavailable", reason });
 }
 
+function participantOf(actor: AuthorizedGameActor): GameParticipant {
+  return Object.freeze({ gameId: actor.gameId, playerId: actor.playerId, seat: actor.seat });
+}
+
+/** Seats are `white` and `black`, so the key is unambiguous for any command id text. */
+function waitKey(seat: Seat, command: LiveGameCommand): string {
+  return `${seat} ${command.clientCommandId}`;
+}
+
+/** The stored game after `plan` was committed on top of `known`. */
+function knownAfter(known: ActiveGameState | null, plan: CommitPlan): ActiveGameState | null {
+  if (plan.kind !== "bind_only") return plan.state;
+  if (known === null) return null;
+  return Object.freeze({
+    ...known,
+    commandBindings: Object.freeze([...known.commandBindings, plan.binding]),
+  });
+}
+
 /** Each request is answered at most once, whatever path answers it. */
 function once<T>(reply: (outcome: T) => void): (outcome: T) => void {
   let answered = false;
@@ -125,8 +152,10 @@ function once<T>(reply: (outcome: T) => void): (outcome: T) => void {
  * (LIVE-WRITER-OWNERSHIP-001: in-process only). Every command, sync, and
  * deadline check passes through one bounded FIFO and runs one at a time, so
  * processing order is the order of the monotonic stamps. State is loaded
- * from the repository for every job; the writer keeps only the last sequence
- * it published and the condition it last observed.
+ * from the repository for every job, and every decision is made on that
+ * load. Besides the last sequence it published and the condition it last
+ * observed, the writer keeps the game as it last loaded or committed it,
+ * only to route ingress: the seats' leases and the stored bindings.
  */
 export class GameWriterRuntime implements GameControlPort {
   readonly gameId: GameId;
@@ -157,8 +186,19 @@ export class GameWriterRuntime implements GameControlPort {
   #lastLoaded = -1;
   #lastLoadFailure: Unavailable | RecoveryRequired = unavailable("temporarily_unavailable");
   #idleTimer: WakeHandle | null = null;
-  /** The seats' leases as this writer last loaded or committed them; null before the first load. */
-  #leases: Readonly<Record<Seat, ControlLeaseId>> | null = null;
+  /**
+   * The game as this writer last loaded or committed it; null before the
+   * first load. Only this writer writes the game, and it updates this on
+   * every load and every commit, so it is the stored game as of the job last
+   * run. It routes ingress only; no decision is made on it.
+   */
+  #known: ActiveGameState | null = null;
+  /**
+   * Command ids of the command and lookup jobs in the queue or in progress,
+   * per seat, with their counts: a job that may still bind the id. At most
+   * the queue's size.
+   */
+  readonly #waiting = new Map<string, number>();
   /** Rotations waiting in the queue, per seat (at most two keys), and the lease the last one sets. */
   readonly #queuedRotations = new Map<
     Seat,
@@ -224,8 +264,10 @@ export class GameWriterRuntime implements GameControlPort {
   /**
    * While play is paused a command is refused before it is stamped: it is
    * not received, reaches no queue, touches no repository, and its command id
-   * stays unbound. So is a command whose lease is not the seat's lease as of
-   * the end of the queue (see `CommandIngress`).
+   * stays unbound. A command id bound or not yet ruled out is taken as a
+   * lookup, with no clock reading (`CommandLookup`). Any other command is
+   * refused when its lease is not the seat's lease as of the end of the
+   * queue, and otherwise received: stamped now, before any repository work.
    */
   submitCommand(
     actor: AuthorizedGameActor,
@@ -242,12 +284,17 @@ export class GameWriterRuntime implements GameControlPort {
         recovery: this.#condition.reason,
       });
     }
-    if (this.#status === "active" && !this.#admits(actor, command)) {
+    const lookup = this.#lookupOf(actor, command);
+    if (lookup === null && this.#status === "active" && !this.#admits(actor, command)) {
       this.#facts.record({ name: "command_refused_control", gameId: this.gameId });
       return CONTROL_NOT_HELD;
     }
     const refused = this.#refusal();
     if (refused !== null) return refused;
+    if (lookup !== null) {
+      this.#enqueue({ kind: "lookup", actor, command, reply: once(reply) });
+      return Object.freeze({ accepted: true, receivedAt: null, lookup });
+    }
     const receivedAt = this.#clock.now();
     this.#enqueue({ kind: "command", actor, command, receivedAt, reply: once(reply) });
     return Object.freeze({ accepted: true, receivedAt });
@@ -287,7 +334,7 @@ export class GameWriterRuntime implements GameControlPort {
   ): SyncIngress {
     const refused = this.#refusal();
     if (refused !== null) return refused;
-    if (!this.#queuedRotations.has(seat) && this.#leases?.[seat] === lease) {
+    if (!this.#queuedRotations.has(seat) && this.#known?.controlLeases[seat] === lease) {
       reply(APPLIED);
       return SYNC_ACCEPTED;
     }
@@ -350,7 +397,7 @@ export class GameWriterRuntime implements GameControlPort {
         const loaded = await inner.loadGame(gameId);
         if (loaded.ok) {
           this.#lastLoaded = loaded.value.state.sequence;
-          this.#leases = loaded.value.state.controlLeases;
+          this.#known = loaded.value.state;
         }
         return loaded;
       },
@@ -360,7 +407,7 @@ export class GameWriterRuntime implements GameControlPort {
           return err({ kind: "concurrency_conflict", expectedSequence: plan.expectedSequence });
         }
         const committed = await inner.commitDecision(plan, clockDomainId);
-        if (committed.ok && plan.kind !== "bind_only") this.#leases = plan.state.controlLeases;
+        if (committed.ok) this.#known = knownAfter(this.#known, plan);
         return committed;
       },
     };
@@ -374,13 +421,38 @@ export class GameWriterRuntime implements GameControlPort {
 
   /**
    * The command's lease is the actor's, and the actor's is the seat's lease
-   * at the end of the queue. Before its first load a writer does not know
-   * the lease; the command job checks it then (`#runCommand`).
+   * at the end of the queue. Only a writer that has loaded the game judges a
+   * command here: before the first load every command is a lookup.
    */
   #admits(actor: AuthorizedGameActor, command: LiveGameCommand): boolean {
     if (command.controlLeaseId !== actor.controlLeaseId) return false;
-    const tail = this.#queuedRotations.get(actor.seat)?.lease ?? this.#leases?.[actor.seat];
-    return tail === undefined || tail === actor.controlLeaseId;
+    const tail =
+      this.#queuedRotations.get(actor.seat)?.lease ?? this.#known?.controlLeases[actor.seat];
+    return tail === actor.controlLeaseId;
+  }
+
+  /**
+   * Why `command` is looked up rather than received, or null when it may be
+   * received: its id is bound in the game as this writer last loaded or
+   * committed it, or it cannot be ruled out because the writer has not
+   * loaded the game or a job that may still bind the id is waiting. With
+   * neither, no job ahead can bind the id, so it is unbound at its turn.
+   * The same rule as the job (`historicalReplay`), on memory; the job
+   * decides again on a fresh load.
+   */
+  #lookupOf(actor: AuthorizedGameActor, command: LiveGameCommand): CommandLookup["lookup"] | null {
+    const known = this.#known;
+    if (known === null) return "unresolved";
+    if (historicalReplay(known, participantOf(actor), command).kind !== "not_bound") return "bound";
+    return this.#waiting.has(waitKey(actor.seat, command)) ? "unresolved" : null;
+  }
+
+  #wait(job: Job, delta: 1 | -1): void {
+    if (job.kind !== "command" && job.kind !== "lookup") return;
+    const key = waitKey(job.actor.seat, job.command);
+    const count = (this.#waiting.get(key) ?? 0) + delta;
+    if (count > 0) this.#waiting.set(key, count);
+    else this.#waiting.delete(key);
   }
 
   #rotationLeft(seat: Seat): void {
@@ -403,6 +475,7 @@ export class GameWriterRuntime implements GameControlPort {
     if (!this.#queue.offer(job)) throw new Error("Writer runtime defect: reserved queue slot");
     if (job.kind === "deadline") this.#deadlineQueued = true;
     else this.#requests += 1;
+    this.#wait(job, 1);
     this.#cancelIdle();
     if (!this.#busy) {
       this.#busy = true;
@@ -446,6 +519,7 @@ export class GameWriterRuntime implements GameControlPort {
   #release(job: Job, refuse: boolean): void {
     if (job.kind === "deadline") return;
     this.#requests -= 1;
+    this.#wait(job, -1);
     if (job.kind === "lease") this.#rotationLeft(job.seat);
     if (!refuse) return;
     const paused = this.#condition?.kind === "infrastructure_paused" ? this.#condition : null;
@@ -473,6 +547,9 @@ export class GameWriterRuntime implements GameControlPort {
     switch (job.kind) {
       case "command":
         await this.#runCommand(job);
+        return;
+      case "lookup":
+        await this.#runLookup(job);
         return;
       case "lease":
         await this.#runLease(job);
@@ -539,8 +616,9 @@ export class GameWriterRuntime implements GameControlPort {
     }
   }
 
+  /** The lease was judged at receipt; a load showing another one refuses before the core. */
   async #runCommand(job: Extract<Job, { kind: "command" }>): Promise<void> {
-    if (this.#leases !== null && this.#leases[job.actor.seat] !== job.actor.controlLeaseId) {
+    if (this.#known?.controlLeases[job.actor.seat] !== job.actor.controlLeaseId) {
       this.#facts.record({ name: "command_refused_control", gameId: this.gameId });
       job.reply(NOT_HELD_OUTCOME);
       return;
@@ -608,6 +686,59 @@ export class GameWriterRuntime implements GameControlPort {
       case "corrupt_state":
         return this.#loadFailed(error);
     }
+  }
+
+  /**
+   * A command of the controlling session taken as a lookup. The stored
+   * bindings answer first, with no clock reading, exactly as for a session
+   * without control: a replay or an identity conflict, never a receipt. An
+   * unbound id is a new command that was not received at ingress: it needs
+   * the seat's lease now, and it is received now only if no clock runs in
+   * this domain, so the load and the queue are never charged to a player
+   * (`CommandOutcome`).
+   */
+  async #runLookup(job: Extract<Job, { kind: "lookup" }>): Promise<void> {
+    const loaded = await loadForWriter(this.#writer, this.gameId);
+    if (!loaded.ok) {
+      job.reply(this.#loadFailed(loaded.error));
+      return;
+    }
+    if (this.#foreignLoad()) {
+      job.reply(this.#ownershipConflict("load"));
+      return;
+    }
+    const { state, condition } = loaded.value;
+    const replay = historicalReplay(state, participantOf(job.actor), job.command);
+    switch (replay.kind) {
+      case "replayed":
+        this.#facts.record({ name: "command_replayed", gameId: this.gameId });
+        job.reply(Object.freeze({ kind: "decided", response: replay.response }));
+        return;
+      case "identity_conflict":
+        this.#facts.record({ name: "replay_identity_conflict", gameId: this.gameId });
+        job.reply(IDENTITY_CONFLICT_OUTCOME);
+        return;
+      case "not_bound":
+        break;
+    }
+    if (!this.#admits(job.actor, job.command)) {
+      this.#facts.record({ name: "command_refused_control", gameId: this.gameId });
+      job.reply(NOT_HELD_OUTCOME);
+      return;
+    }
+    if (condition.kind === "running") {
+      this.#facts.record({ name: "command_not_received", gameId: this.gameId });
+      job.reply(unavailable("temporarily_unavailable"));
+      return;
+    }
+    const { actor, command, reply } = job;
+    await this.#runCommand({
+      kind: "command",
+      actor,
+      command,
+      receivedAt: this.#clock.now(),
+      reply,
+    });
   }
 
   async #runReplay(job: Extract<Job, { kind: "replay" }>): Promise<void> {
